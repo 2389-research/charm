@@ -1,0 +1,152 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  release:
+    name: Release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+          cache: true
+
+      - name: Build binaries
+        run: |
+          VERSION=${GITHUB_REF_NAME#v}
+          COMMIT=${GITHUB_SHA}
+          DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          LDFLAGS="-s -w -X main.Version=${VERSION} -X main.CommitSHA=${COMMIT}"
+
+          # Darwin amd64
+          GOOS=darwin GOARCH=amd64 go build -ldflags="${LDFLAGS}" -o charm-darwin-amd64 .
+
+          # Darwin arm64
+          GOOS=darwin GOARCH=arm64 go build -ldflags="${LDFLAGS}" -o charm-darwin-arm64 .
+
+          # Linux amd64
+          GOOS=linux GOARCH=amd64 go build -ldflags="${LDFLAGS}" -o charm-linux-amd64 .
+
+          # Linux arm64
+          GOOS=linux GOARCH=arm64 go build -ldflags="${LDFLAGS}" -o charm-linux-arm64 .
+
+          # Windows amd64
+          GOOS=windows GOARCH=amd64 go build -ldflags="${LDFLAGS}" -o charm-windows-amd64.exe .
+
+      - name: Create archives
+        run: |
+          VERSION=${GITHUB_REF_NAME#v}
+
+          # Darwin amd64
+          mkdir -p charm_${VERSION}_Darwin_x86_64
+          cp charm-darwin-amd64 charm_${VERSION}_Darwin_x86_64/charm
+          cp README.md LICENSE charm_${VERSION}_Darwin_x86_64/ 2>/dev/null || true
+          tar -czvf charm_${VERSION}_Darwin_x86_64.tar.gz charm_${VERSION}_Darwin_x86_64
+
+          # Darwin arm64
+          mkdir -p charm_${VERSION}_Darwin_arm64
+          cp charm-darwin-arm64 charm_${VERSION}_Darwin_arm64/charm
+          cp README.md LICENSE charm_${VERSION}_Darwin_arm64/ 2>/dev/null || true
+          tar -czvf charm_${VERSION}_Darwin_arm64.tar.gz charm_${VERSION}_Darwin_arm64
+
+          # Linux amd64
+          mkdir -p charm_${VERSION}_Linux_x86_64
+          cp charm-linux-amd64 charm_${VERSION}_Linux_x86_64/charm
+          cp README.md LICENSE charm_${VERSION}_Linux_x86_64/ 2>/dev/null || true
+          tar -czvf charm_${VERSION}_Linux_x86_64.tar.gz charm_${VERSION}_Linux_x86_64
+
+          # Linux arm64
+          mkdir -p charm_${VERSION}_Linux_arm64
+          cp charm-linux-arm64 charm_${VERSION}_Linux_arm64/charm
+          cp README.md LICENSE charm_${VERSION}_Linux_arm64/ 2>/dev/null || true
+          tar -czvf charm_${VERSION}_Linux_arm64.tar.gz charm_${VERSION}_Linux_arm64
+
+          # Windows amd64
+          mkdir -p charm_${VERSION}_Windows_x86_64
+          cp charm-windows-amd64.exe charm_${VERSION}_Windows_x86_64/charm.exe
+          cp README.md LICENSE charm_${VERSION}_Windows_x86_64/ 2>/dev/null || true
+          zip -r charm_${VERSION}_Windows_x86_64.zip charm_${VERSION}_Windows_x86_64
+
+      - name: Generate checksums
+        run: |
+          VERSION=${GITHUB_REF_NAME#v}
+          sha256sum charm_${VERSION}_*.tar.gz charm_${VERSION}_*.zip > checksums.txt
+
+      - name: Create Release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION=${GITHUB_REF_NAME#v}
+          gh release create ${GITHUB_REF_NAME} \
+            --title "v${VERSION}" \
+            --generate-notes \
+            charm_${VERSION}_Darwin_x86_64.tar.gz \
+            charm_${VERSION}_Darwin_arm64.tar.gz \
+            charm_${VERSION}_Linux_x86_64.tar.gz \
+            charm_${VERSION}_Linux_arm64.tar.gz \
+            charm_${VERSION}_Windows_x86_64.zip \
+            checksums.txt
+
+      - name: Update Homebrew Tap
+        env:
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          VERSION=${GITHUB_REF_NAME#v}
+
+          # Get SHA256 for Darwin archives
+          SHA_AMD64=$(sha256sum charm_${VERSION}_Darwin_x86_64.tar.gz | cut -d' ' -f1)
+          SHA_ARM64=$(sha256sum charm_${VERSION}_Darwin_arm64.tar.gz | cut -d' ' -f1)
+
+          # Generate formula
+          cat > charm.rb << EOF
+          class Charm < Formula
+            desc "2389 Charm - Backend tools for terminal applications"
+            homepage "https://github.com/2389-research/charm"
+            version "${VERSION}"
+            license "MIT"
+
+            on_macos do
+              on_intel do
+                url "https://github.com/2389-research/charm/releases/download/v${VERSION}/charm_${VERSION}_Darwin_x86_64.tar.gz"
+                sha256 "${SHA_AMD64}"
+              end
+              on_arm do
+                url "https://github.com/2389-research/charm/releases/download/v${VERSION}/charm_${VERSION}_Darwin_arm64.tar.gz"
+                sha256 "${SHA_ARM64}"
+              end
+            end
+
+            def install
+              bin.install "charm"
+            end
+
+            test do
+              system "#{bin}/charm", "--version"
+            end
+          end
+          EOF
+
+          # Clone tap and update formula
+          git clone https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/2389-research/homebrew-tap.git tap
+          mkdir -p tap/Formula
+          cp charm.rb tap/Formula/
+          cd tap
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/charm.rb
+          git commit -m "Update charm to ${VERSION}"
+          git push

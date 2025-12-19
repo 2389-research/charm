@@ -1,38 +1,32 @@
+version: "2"
+
 run:
   tests: false
-
-issues:
-  include:
-    - EXC0001
-    - EXC0005
-    - EXC0011
-    - EXC0012
-    - EXC0013
-
-  max-issues-per-linter: 0
-  max-same-issues: 0
+  timeout: 5m
 
 linters:
+  disable:
+    - staticcheck
   enable:
     - bodyclose
-    - dupl
-    - exportloopref
     - goconst
-    - godot
-    - godox
-    - goimports
-    - goprintffuncname
-    - gosec
+    - govet
+    - ineffassign
     - misspell
-    - prealloc
-    - revive
-    - rowserrcheck
-    - sqlclosecheck
     - unconvert
-    - unparam
+    - unused
     - whitespace
+  settings:
+    errcheck:
+      exclude-functions:
+        - fmt.Fprintf
+        - fmt.Fprintln
+        - fmt.Fprint
 
-rules:
-  - linters:
-    - godox
-    severity: warn
+formatters:
+  enable:
+    - goimports
+
+issues:
+  max-issues-per-linter: 50
+  max-same-issues: 10

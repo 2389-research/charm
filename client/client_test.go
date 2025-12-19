@@ -3,11 +3,28 @@ package client
 import (
 	"os"
 	"strings"
+	"sync"
 	"testing"
+
+	charm "github.com/charmbracelet/charm/proto"
 )
 
 func TestMain(m *testing.M) {
 	os.Exit(m.Run())
+}
+
+// NewTestClient creates a minimal client for testing purposes with the provided encryption keys.
+// This is a test helper that bypasses normal client initialization.
+func NewTestClient(keys []*charm.EncryptKey) *Client {
+	return &Client{
+		Config: &Config{
+			Host: "localhost",
+		},
+		auth:                 &charm.Auth{},
+		authLock:             &sync.Mutex{},
+		encryptKeyLock:       &sync.Mutex{},
+		plainTextEncryptKeys: keys,
+	}
 }
 
 func TestNameValidation(t *testing.T) {

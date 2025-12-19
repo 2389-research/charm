@@ -1,18 +1,26 @@
-# See https://fly.io/docs/app-guides/continuous-deployment-with-github-actions/
-
+# ABOUTME: GitHub Actions workflow for deploying 2389 Charm server to Fly.io
+# ABOUTME: Triggers on pushes to main or version tags
 name: Fly Deploy
+
 on:
   push:
-    branches:
-      - main
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+
 jobs:
   deploy:
-    name: Deploy app
+    name: Deploy to Fly.io
     runs-on: ubuntu-latest
-    concurrency: deploy-group    # optional: ensure only one action runs at a time
+    concurrency: deploy-group
     steps:
-      - uses: actions/checkout@v4
-      - uses: superfly/flyctl-actions/setup-flyctl@master
-      - run: flyctl deploy --remote-only
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Set up Fly CLI
+        uses: superfly/flyctl-actions/setup-flyctl@master
+
+      - name: Deploy to Fly.io
+        run: flyctl deploy --remote-only
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}

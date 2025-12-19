@@ -286,20 +286,6 @@ func (d *DB) recordIDToInt(id string) int {
 	return sum
 }
 
-func (d *DB) findUserByIntID(txApp core.App, intID int) (*core.Record, error) {
-	// This is a compatibility shim - we iterate to find matching ID
-	records, err := txApp.FindAllRecords(pb.CollectionCharmUsers)
-	if err != nil {
-		return nil, err
-	}
-	for _, r := range records {
-		if d.recordIDToInt(r.Id) == intID {
-			return r, nil
-		}
-	}
-	return nil, fmt.Errorf("user not found with int ID %d", intID)
-}
-
 // LinkUserKey links a user to a key.
 func (d *DB) LinkUserKey(user *charm.User, key string) error {
 	ks := charm.PublicKeySha(key)
@@ -429,17 +415,19 @@ func (d *DB) EncryptKeysForPublicKey(pk *charm.PublicKey) ([]*charm.EncryptKey, 
 func (d *DB) AddEncryptKeyForPublicKey(u *charm.User, pk string, gid string, ek string, ca *time.Time) error {
 	log.Debug("Adding encrypted key for user", "key", gid, "time", ca, "id", u.CharmID)
 
+	// Verify the public key belongs to this user BEFORE the transaction
+	// to avoid deadlock (RunInTransaction holds a lock, and UserForKey would
+	// try to acquire the same lock via d.pb())
+	u2, err := d.UserForKey(pk, false)
+	if err != nil {
+		return err
+	}
+	if u2.CharmID != u.CharmID {
+		return fmt.Errorf("trying to add encrypted key for unauthorized user")
+	}
+
 	app := d.pb()
 	return app.RunInTransaction(func(txApp core.App) error {
-		// Verify the public key belongs to this user
-		u2, err := d.UserForKey(pk, false)
-		if err != nil {
-			return err
-		}
-		if u2.CharmID != u.CharmID {
-			return fmt.Errorf("trying to add encrypted key for unauthorized user")
-		}
-
 		// Find public key record
 		pkRecord, err := txApp.FindFirstRecordByData(pb.CollectionPublicKeys, "public_key", pk)
 		if err != nil {
@@ -574,28 +562,44 @@ func (d *DB) GetNewsList(tag string, page int) ([]*charm.News, error) {
 
 	news := make([]*charm.News, 0, len(records))
 	for _, r := range records {
-		news = append(news, d.recordToNews(r))
+		news = append(news, d.recordToNewsSummary(r))
 	}
 
 	return news, nil
 }
 
-func (d *DB) recordToNews(r *core.Record) *charm.News {
-	tags := r.Get("tags")
-	tag := ""
-	if tagSlice, ok := tags.([]interface{}); ok && len(tagSlice) > 0 {
-		if s, ok := tagSlice[0].(string); ok {
-			tag = s
-		}
+// recordToNewsSummary converts a PocketBase record to a News summary (without body).
+// Used for list operations where the full body is not needed.
+func (d *DB) recordToNewsSummary(r *core.Record) *charm.News {
+	return &charm.News{
+		ID:        r.Id,
+		Subject:   r.GetString("subject"),
+		Tag:       d.extractFirstTag(r),
+		CreatedAt: r.GetDateTime("created").Time(),
 	}
+}
 
+// recordToNews converts a PocketBase record to a full News item (with body).
+// Used for individual news retrieval.
+func (d *DB) recordToNews(r *core.Record) *charm.News {
 	return &charm.News{
 		ID:        r.Id,
 		Subject:   r.GetString("subject"),
 		Body:      r.GetString("body"),
-		Tag:       tag,
+		Tag:       d.extractFirstTag(r),
 		CreatedAt: r.GetDateTime("created").Time(),
 	}
+}
+
+// extractFirstTag extracts the first tag from a record's tags field.
+func (d *DB) extractFirstTag(r *core.Record) string {
+	tags := r.Get("tags")
+	if tagSlice, ok := tags.([]interface{}); ok && len(tagSlice) > 0 {
+		if s, ok := tagSlice[0].(string); ok {
+			return s
+		}
+	}
+	return ""
 }
 
 // SetToken creates the given token.

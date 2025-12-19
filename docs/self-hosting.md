@@ -3,14 +3,14 @@
 Charm libraries point at our Charmbracelet, Inc. servers by default (that’s
 *cloud.charm.sh*), however it's very easy for users to host their own Charm
 instances. The charm binary is a single, statically-linked executable capable
-of serving an entire Charm instance. 
+of serving an entire Charm instance.
 
 ## Ze Server
 
 To start your charm server, run `charm serve` in a dedicated terminal window or
-in a [Docker container](https://github.com/charmbracelet/charm/blob/main/docker.md). 
+in a [Docker container](https://github.com/charmbracelet/charm/blob/main/docker.md).
 Then, change the default host by adding `CHARM_HOST=localhost` or
-`CHARM_HOST=burrito.example.com` to your PATH. 
+`CHARM_HOST=burrito.example.com` to your PATH.
 
 ## Ze Client
 
@@ -19,12 +19,12 @@ to change a few environment variables. Namely,
 
 * `CHARM_HOST`: This should match the public URL to your Charm server.
 * `CHARM_HTTP_PORT`: This should match the port your reverse proxy accepts for HTTP connections.
-* `CHARM_SERVER_PUBLIC_URL`: This is the public URL set on your Charm server. 
+* `CHARM_SERVER_PUBLIC_URL`: This is the public URL set on your Charm server.
 
 By default, the `CHARM_HTTP_PORT` value is set to `35354`. If you're using a
 default HTTP reverse proxy, you'll need to change the reverse proxy to accept
 port `35354` for HTTP connections or change the `CHARM_HTTP_PORT` to `443` on
-the client side. 
+the client side.
 
 ## Self-Hosting With TLS
 
@@ -55,10 +55,10 @@ port `35354`, then use proxy_pass to reverse proxy the requests to your Charm
 instance. For SSH port `35353`, you'd just need to make sure that this port
 accepts incoming traffic on the VPS.
 
-Helpful resources:  
-[1] https://docs.nginx.com/nginx/admin-guide/security-controls/terminating-ssl-http/  
-[2] https://docs.nginx.com/nginx/admin-guide/web-server/reverse-proxy/  
-[3] https://upcloud.com/community/tutorials/install-lets-encrypt-nginx/  
+Helpful resources:
+[1] https://docs.nginx.com/nginx/admin-guide/security-controls/terminating-ssl-http/
+[2] https://docs.nginx.com/nginx/admin-guide/web-server/reverse-proxy/
+[3] https://upcloud.com/community/tutorials/install-lets-encrypt-nginx/
 
 ## Storage Restrictions
 

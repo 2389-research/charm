@@ -129,9 +129,9 @@ func (s *FileStore) Put(charmID string, path string, r io.Reader, mode fs.FileMo
 		tmpPath := tmpFile.Name()
 
 		_, err = io.Copy(tmpFile, r)
-		tmpFile.Close()
+		_ = tmpFile.Close()
 		if err != nil {
-			os.Remove(tmpPath)
+			_ = os.Remove(tmpPath)
 			return err
 		}
 
@@ -139,11 +139,11 @@ func (s *FileStore) Put(charmID string, path string, r io.Reader, mode fs.FileMo
 		filename := filepath.Base(path)
 		finalTmpPath := filepath.Join(filepath.Dir(tmpPath), filename)
 		if err := os.Rename(tmpPath, finalTmpPath); err != nil {
-			os.Remove(tmpPath) // Clean up original if rename failed
+			_ = os.Remove(tmpPath) // Clean up original if rename failed
 			return err
 		}
 		// Defer cleanup BEFORE calling NewFileFromPath so cleanup runs even if it fails
-		defer os.Remove(finalTmpPath)
+		defer func() { _ = os.Remove(finalTmpPath) }()
 
 		file, err := filesystem.NewFileFromPath(finalTmpPath)
 		if err != nil {
@@ -353,7 +353,7 @@ func (s *FileStore) getFile(record *core.Record) (fs.File, error) {
 	// Get reader from PocketBase storage - don't read all into memory
 	reader, err := fsys.GetFile(key)
 	if err != nil {
-		fsys.Close()
+		_ = fsys.Close()
 		return nil, err
 	}
 

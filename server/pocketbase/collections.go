@@ -19,6 +19,22 @@ const (
 	CollectionCharmFiles  = "charm_files"
 )
 
+// addSystemFields adds the standard created/updated autodate fields to a collection.
+// In PocketBase v0.23+, these fields are optional and must be explicitly registered.
+func addSystemFields(collection *core.Collection) {
+	collection.Fields.Add(
+		&core.AutodateField{
+			Name:     "created",
+			OnCreate: true,
+		},
+		&core.AutodateField{
+			Name:     "updated",
+			OnCreate: true,
+			OnUpdate: true,
+		},
+	)
+}
+
 // EnsureCollections creates all required collections if they don't exist.
 func (a *App) EnsureCollections() error {
 	log.Debug("Ensuring PocketBase collections exist")
@@ -56,6 +72,7 @@ func (a *App) ensureCharmUsersCollection() error {
 	}
 
 	collection := core.NewBaseCollection(CollectionCharmUsers)
+	addSystemFields(collection)
 	collection.Fields.Add(
 		&core.TextField{Name: "charm_id", Required: true},
 		&core.TextField{Name: "name"},
@@ -81,6 +98,7 @@ func (a *App) ensurePublicKeysCollection() error {
 	}
 
 	collection := core.NewBaseCollection(CollectionPublicKeys)
+	addSystemFields(collection)
 	collection.Fields.Add(
 		&core.RelationField{
 			Name:          "user",
@@ -109,6 +127,7 @@ func (a *App) ensureEncryptKeysCollection() error {
 	}
 
 	collection := core.NewBaseCollection(CollectionEncryptKeys)
+	addSystemFields(collection)
 	collection.Fields.Add(
 		&core.RelationField{
 			Name:          "public_key",
@@ -137,6 +156,7 @@ func (a *App) ensureNamedSeqsCollection() error {
 	}
 
 	collection := core.NewBaseCollection(CollectionNamedSeqs)
+	addSystemFields(collection)
 	collection.Fields.Add(
 		&core.RelationField{
 			Name:          "user",
@@ -159,6 +179,7 @@ func (a *App) ensureNewsCollection() error {
 	}
 
 	collection := core.NewBaseCollection(CollectionNews)
+	addSystemFields(collection)
 	collection.Fields.Add(
 		&core.TextField{Name: "subject", Required: true},
 		&core.TextField{Name: "body"},
@@ -175,6 +196,7 @@ func (a *App) ensureTokensCollection() error {
 	}
 
 	collection := core.NewBaseCollection(CollectionTokens)
+	addSystemFields(collection)
 	collection.Fields.Add(
 		&core.TextField{Name: "pin", Required: true},
 	)
@@ -190,6 +212,7 @@ func (a *App) ensureCharmFilesCollection() error {
 	}
 
 	collection := core.NewBaseCollection(CollectionCharmFiles)
+	addSystemFields(collection)
 	collection.Fields.Add(
 		&core.TextField{Name: "charm_id", Required: true},
 		&core.TextField{Name: "path", Required: true},

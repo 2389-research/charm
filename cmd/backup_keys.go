@@ -139,7 +139,7 @@ func createTar(source string, target string) error {
 
 	info, err := os.Stat(source)
 	if err != nil {
-		return nil
+		return err
 	}
 
 	var baseDir string

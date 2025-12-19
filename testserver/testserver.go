@@ -33,6 +33,7 @@ func SetupTestServer(tb testing.TB) *client.Client {
 	cfg.SSHPort = randomPort(tb)
 	cfg.HTTPPort = randomPort(tb)
 	cfg.HealthPort = randomPort(tb)
+	cfg.PBPort = randomPort(tb)
 
 	kp, err := keygen.New(filepath.Join(sp, "charm_server_ed25519"), keygen.WithKeyType(keygen.Ed25519), keygen.WithWrite())
 	if err != nil {

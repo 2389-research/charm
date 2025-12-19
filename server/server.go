@@ -8,17 +8,17 @@ import (
 	"fmt"
 	glog "log"
 	"net/url"
-	"path/filepath"
 
 	env "github.com/caarlos0/env/v6"
 	charm "github.com/charmbracelet/charm/proto"
 	"github.com/charmbracelet/charm/server/db"
-	"github.com/charmbracelet/charm/server/db/sqlite"
+	pbdb "github.com/charmbracelet/charm/server/db/pocketbase"
+	pbapp "github.com/charmbracelet/charm/server/pocketbase"
 	"github.com/charmbracelet/charm/server/stats"
 	"github.com/charmbracelet/charm/server/stats/noop"
 	"github.com/charmbracelet/charm/server/stats/prometheus"
 	"github.com/charmbracelet/charm/server/storage"
-	lfs "github.com/charmbracelet/charm/server/storage/local"
+	pbstorage "github.com/charmbracelet/charm/server/storage/pocketbase"
 	"github.com/charmbracelet/log"
 	gossh "golang.org/x/crypto/ssh"
 	"golang.org/x/sync/errgroup"
@@ -32,6 +32,7 @@ type Config struct {
 	HTTPPort       int    `env:"CHARM_SERVER_HTTP_PORT" envDefault:"35354"`
 	StatsPort      int    `env:"CHARM_SERVER_STATS_PORT" envDefault:"35355"`
 	HealthPort     int    `env:"CHARM_SERVER_HEALTH_PORT" envDefault:"35356"`
+	PBPort         int    `env:"CHARM_SERVER_PB_PORT" envDefault:"35357"`
 	DataDir        string `env:"CHARM_SERVER_DATA_DIR" envDefault:"data"`
 	UseTLS         bool   `env:"CHARM_SERVER_USE_TLS" envDefault:"false"`
 	TLSKeyFile     string `env:"CHARM_SERVER_TLS_KEY_FILE"`
@@ -199,21 +200,33 @@ func (srv *Server) Close() error {
 }
 
 func (srv *Server) init(cfg *Config) {
+	// Initialize PocketBase
+	pbCfg := &pbapp.Config{
+		DataDir: cfg.DataDir,
+		Port:    cfg.PBPort,
+	}
+	pbApp, err := pbapp.New(pbCfg)
+	if err != nil {
+		log.Fatal("failed to create PocketBase app", "err", err)
+	}
+
+	// Bootstrap and ensure collections
+	if err := pbApp.Bootstrap(); err != nil {
+		log.Fatal("failed to bootstrap PocketBase", "err", err)
+	}
+	if err := pbApp.EnsureCollections(); err != nil {
+		log.Fatal("failed to ensure PocketBase collections", "err", err)
+	}
+
+	// Start PocketBase async
+	pbApp.StartAsync()
+
+	// Use PocketBase implementations
 	if cfg.DB == nil {
-		dp := filepath.Join(cfg.DataDir, "db")
-		err := storage.EnsureDir(dp, 0o700)
-		if err != nil {
-			log.Fatal("could not init sqlite path", "err", err)
-		}
-		db := sqlite.NewDB(filepath.Join(dp, sqlite.DbName))
-		srv.Config = cfg.WithDB(db)
+		srv.Config = cfg.WithDB(pbdb.New(pbApp))
 	}
 	if cfg.FileStore == nil {
-		fs, err := lfs.NewLocalFileStore(filepath.Join(cfg.DataDir, "files"))
-		if err != nil {
-			log.Fatal("could not init file path", "err", err)
-		}
-		srv.Config = cfg.WithFileStore(fs)
+		srv.Config = cfg.WithFileStore(pbstorage.New(pbApp))
 	}
 	if cfg.Stats == nil {
 		srv.Config = cfg.WithStats(getStatsImpl(cfg))

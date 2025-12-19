@@ -13,7 +13,7 @@ import (
 	"github.com/muesli/toktok"
 )
 
-// SSHLinker implments proto.LinkTransport for the Charm SSH server.
+// SSHLinker implements proto.LinkTransport for the Charm SSH server.
 type SSHLinker struct {
 	server  *SSHServer
 	account *charm.User
@@ -177,7 +177,7 @@ func (me *SSHServer) LinkGen(lt charm.LinkTransport) error {
 					return err
 				}
 				l.Status = charm.LinkStatusSuccess
-			} else if lu.ID == u.ID {
+			} else if lu.CharmID == u.CharmID {
 				// Maybe they're already linked
 				log.Debug("Key is already linked to account", "id", u.CharmID)
 				l.Status = charm.LinkStatusSameUser
@@ -185,7 +185,7 @@ func (me *SSHServer) LinkGen(lt charm.LinkTransport) error {
 			} else {
 				// Link requester's key is linked to another acccount, merge
 				log.Debug("Key is already linked to different account", "id", lu.CharmID)
-				err = me.db.MergeUsers(u.ID, lu.ID)
+				err = me.db.MergeUsers(u.CharmID, lu.CharmID)
 				if err != nil {
 					l.Status = charm.LinkStatusError
 					me.linkQueue.SendLinkRequest(lt, linkRequest, l)

@@ -90,6 +90,7 @@ docker-run: ## Run the Docker container
 		-p 35354:35354 \
 		-p 35355:35355 \
 		-p 35356:35356 \
+		-p 35357:35357 \
 		-v charm-data:/data \
 		$(BINARY_NAME):latest
 

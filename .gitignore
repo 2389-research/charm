@@ -8,3 +8,4 @@ cmd/coverage.out
 charm-keys-backup.tar
 completions/
 manpages/
+worktrees/

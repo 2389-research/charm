@@ -4,6 +4,7 @@
 package kv
 
 import (
+	"bytes"
 	"path/filepath"
 	"testing"
 )
@@ -173,5 +174,66 @@ func TestSQLiteMeta(t *testing.T) {
 	}
 	if val != 42 {
 		t.Errorf("GetMeta returned %d, want 42", val)
+	}
+}
+
+func TestSQLiteBackupRestore(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+
+	// Create and populate source database
+	db, err := openSQLite(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open sqlite: %v", err)
+	}
+
+	testData := map[string]string{
+		"key1": "value1",
+		"key2": "value2",
+		"key3": "value3",
+	}
+	for k, v := range testData {
+		if err := sqliteSet(db, []byte(k), []byte(v)); err != nil {
+			t.Fatalf("Set failed: %v", err)
+		}
+	}
+	if err := sqliteSetMeta(db, "max_version", 100); err != nil {
+		t.Fatalf("SetMeta failed: %v", err)
+	}
+	db.Close()
+
+	// Backup to buffer
+	var buf bytes.Buffer
+	if err := sqliteBackup(dbPath, &buf); err != nil {
+		t.Fatalf("Backup failed: %v", err)
+	}
+
+	// Restore to new database
+	restorePath := filepath.Join(dir, "restored.db")
+	if err := sqliteRestore(&buf, restorePath); err != nil {
+		t.Fatalf("Restore failed: %v", err)
+	}
+
+	// Verify restored data
+	restored, err := openSQLite(restorePath)
+	if err != nil {
+		t.Fatalf("failed to open restored db: %v", err)
+	}
+	defer restored.Close()
+
+	for k, want := range testData {
+		got, err := sqliteGet(restored, []byte(k))
+		if err != nil {
+			t.Errorf("Get %s failed: %v", k, err)
+			continue
+		}
+		if string(got) != want {
+			t.Errorf("Get %s = %q, want %q", k, got, want)
+		}
+	}
+
+	ver, _ := sqliteGetMeta(restored, "max_version")
+	if ver != 100 {
+		t.Errorf("max_version = %d, want 100", ver)
 	}
 }

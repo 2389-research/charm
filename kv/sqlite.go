@@ -6,6 +6,8 @@ package kv
 import (
 	"database/sql"
 	"fmt"
+	"io"
+	"os"
 
 	_ "modernc.org/sqlite"
 )
@@ -131,5 +133,51 @@ func sqliteSetMeta(db *sql.DB, name string, value int64) error {
 	if err != nil {
 		return fmt.Errorf("failed to set meta %s: %w", name, err)
 	}
+	return nil
+}
+
+// sqliteBackup creates a backup of the database to the writer.
+// Uses WAL checkpoint to ensure all data is in the main database file.
+//
+//nolint:unused // Will be used in kv.go integration
+func sqliteBackup(srcPath string, w io.Writer) error {
+	// Open source for backup in read-only mode
+	src, err := sql.Open("sqlite", srcPath+"?mode=ro")
+	if err != nil {
+		return fmt.Errorf("failed to open source for backup: %w", err)
+	}
+	defer func() { _ = src.Close() }()
+
+	// Checkpoint WAL to ensure all data is in main file
+	if _, err := src.Exec("PRAGMA wal_checkpoint(TRUNCATE)"); err != nil {
+		return fmt.Errorf("failed to checkpoint WAL: %w", err)
+	}
+
+	// Read the database file
+	data, err := os.ReadFile(srcPath)
+	if err != nil {
+		return fmt.Errorf("failed to read database file: %w", err)
+	}
+
+	if _, err := w.Write(data); err != nil {
+		return fmt.Errorf("failed to write backup: %w", err)
+	}
+
+	return nil
+}
+
+// sqliteRestore restores a database from the reader.
+//
+//nolint:unused // Will be used in kv.go integration
+func sqliteRestore(r io.Reader, dstPath string) error {
+	data, err := io.ReadAll(r)
+	if err != nil {
+		return fmt.Errorf("failed to read backup data: %w", err)
+	}
+
+	if err := os.WriteFile(dstPath, data, 0600); err != nil {
+		return fmt.Errorf("failed to write database file: %w", err)
+	}
+
 	return nil
 }

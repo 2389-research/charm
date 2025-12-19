@@ -82,3 +82,27 @@ func sqliteDelete(db *sql.DB, key []byte) error {
 	}
 	return nil
 }
+
+// sqliteKeys returns all keys in the database.
+//
+//nolint:unused // Will be used in kv.go integration
+func sqliteKeys(db *sql.DB) ([][]byte, error) {
+	rows, err := db.Query("SELECT key FROM kv")
+	if err != nil {
+		return nil, fmt.Errorf("failed to query keys: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var keys [][]byte
+	for rows.Next() {
+		var key []byte
+		if err := rows.Scan(&key); err != nil {
+			return nil, fmt.Errorf("failed to scan key: %w", err)
+		}
+		keys = append(keys, key)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating keys: %w", err)
+	}
+	return keys, nil
+}

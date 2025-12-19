@@ -75,3 +75,32 @@ func TestSQLiteCRUD(t *testing.T) {
 		t.Errorf("Get after delete should return ErrMissingKey, got %v", err)
 	}
 }
+
+func TestSQLiteKeys(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+
+	db, err := openSQLite(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open sqlite: %v", err)
+	}
+	defer db.Close()
+
+	// Insert some keys
+	keys := [][]byte{[]byte("a"), []byte("b"), []byte("c")}
+	for _, k := range keys {
+		if err := sqliteSet(db, k, []byte("value")); err != nil {
+			t.Fatalf("Set failed: %v", err)
+		}
+	}
+
+	// Get all keys
+	got, err := sqliteKeys(db)
+	if err != nil {
+		t.Fatalf("Keys failed: %v", err)
+	}
+
+	if len(got) != len(keys) {
+		t.Errorf("Keys returned %d keys, want %d", len(got), len(keys))
+	}
+}

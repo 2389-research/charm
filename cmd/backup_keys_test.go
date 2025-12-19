@@ -378,3 +378,76 @@ func TestFileOrDirectoryExists(t *testing.T) {
 		}
 	})
 }
+
+func TestCreateTarNonExistentSource(t *testing.T) {
+	// REGRESSION TEST: createTar should return error for non-existent source
+	// Current bug: line 140-142 in backup_keys.go returns nil instead of err
+	// when os.Stat(source) fails, silently succeeding instead of erroring
+	tmpDir := t.TempDir()
+	nonExistentSource := filepath.Join(tmpDir, "does-not-exist")
+	targetTar := filepath.Join(tmpDir, "output.tar")
+
+	err := createTar(nonExistentSource, targetTar)
+	if err == nil {
+		t.Fatal("expected error when source directory does not exist, got nil")
+	}
+
+	// Verify the error message indicates the source doesn't exist
+	if !strings.Contains(err.Error(), "no such file or directory") &&
+		!strings.Contains(err.Error(), "does not exist") &&
+		!strings.Contains(err.Error(), "cannot find") {
+		t.Errorf("expected error about missing source, got: %s", err.Error())
+	}
+}
+
+func TestBackupKeysAutoAddsTarSuffix(t *testing.T) {
+	// Test that backup-keys -o /tmp/foo creates /tmp/foo.tar (suffix auto-added)
+	_ = testserver.SetupTestServer(t)
+
+	tmpDir := t.TempDir()
+	outputPath := filepath.Join(tmpDir, "my-backup")
+	expectedPath := outputPath + ".tar"
+
+	// Clean up any existing files
+	_ = os.RemoveAll(outputPath)
+	_ = os.RemoveAll(expectedPath)
+
+	BackupKeysCmd.SetArgs([]string{"-o", outputPath})
+	if err := BackupKeysCmd.Execute(); err != nil {
+		t.Fatalf("command failed: %s", err)
+	}
+
+	// Verify the file was created with .tar suffix
+	if !fileOrDirectoryExists(expectedPath) {
+		t.Errorf("expected file to be created at %s, but it does not exist", expectedPath)
+	}
+
+	// Verify the file without suffix was NOT created
+	if fileOrDirectoryExists(outputPath) {
+		t.Errorf("file should not exist at %s (without .tar suffix)", outputPath)
+	}
+
+	// Verify it's a valid tar file
+	f, err := os.Open(expectedPath)
+	if err != nil {
+		t.Fatalf("failed to open tar file: %s", err)
+	}
+	defer f.Close()
+
+	r := tar.NewReader(f)
+	fileCount := 0
+	for {
+		_, err := r.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatalf("error reading tar: %s", err)
+		}
+		fileCount++
+	}
+
+	if fileCount < 2 {
+		t.Errorf("expected at least 2 files in tar (key pair), got %d", fileCount)
+	}
+}

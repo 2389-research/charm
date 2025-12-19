@@ -9,6 +9,9 @@ import (
 	"strings"
 )
 
+// ErrMissingKey is returned when a key is not found in the database.
+var ErrMissingKey = errors.New("key not found")
+
 // ErrDatabaseLocked is returned when the database cannot be opened because
 // another process holds the lock.
 type ErrDatabaseLocked struct {

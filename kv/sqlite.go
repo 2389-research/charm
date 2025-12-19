@@ -45,3 +45,40 @@ func openSQLite(path string) (*sql.DB, error) {
 
 	return db, nil
 }
+
+// sqliteGet retrieves a value by key. Returns ErrMissingKey if not found.
+//
+//nolint:unused // Will be used in kv.go integration
+func sqliteGet(db *sql.DB, key []byte) ([]byte, error) {
+	var value []byte
+	err := db.QueryRow("SELECT value FROM kv WHERE key = ?", key).Scan(&value)
+	if err == sql.ErrNoRows {
+		return nil, ErrMissingKey
+	}
+	if err != nil {
+		return nil, fmt.Errorf("failed to get key: %w", err)
+	}
+	return value, nil
+}
+
+// sqliteSet stores a key-value pair, overwriting if exists.
+//
+//nolint:unused // Will be used in kv.go integration
+func sqliteSet(db *sql.DB, key, value []byte) error {
+	_, err := db.Exec("INSERT OR REPLACE INTO kv (key, value) VALUES (?, ?)", key, value)
+	if err != nil {
+		return fmt.Errorf("failed to set key: %w", err)
+	}
+	return nil
+}
+
+// sqliteDelete removes a key. No error if key doesn't exist.
+//
+//nolint:unused // Will be used in kv.go integration
+func sqliteDelete(db *sql.DB, key []byte) error {
+	_, err := db.Exec("DELETE FROM kv WHERE key = ?", key)
+	if err != nil {
+		return fmt.Errorf("failed to delete key: %w", err)
+	}
+	return nil
+}

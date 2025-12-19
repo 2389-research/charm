@@ -237,3 +237,89 @@ func TestSQLiteBackupRestore(t *testing.T) {
 		t.Errorf("max_version = %d, want 100", ver)
 	}
 }
+
+func TestValidateSQLitePath(t *testing.T) {
+	tests := []struct {
+		name    string
+		path    string
+		wantErr bool
+	}{
+		{
+			name:    "valid path",
+			path:    "/tmp/backup-123.db",
+			wantErr: false,
+		},
+		{
+			name:    "path with spaces",
+			path:    "/tmp/my backup.db",
+			wantErr: false,
+		},
+		{
+			name:    "null byte injection",
+			path:    "/tmp/test\x00.db",
+			wantErr: true,
+		},
+		{
+			name:    "newline injection",
+			path:    "/tmp/test\n.db",
+			wantErr: true,
+		},
+		{
+			name:    "carriage return injection",
+			path:    "/tmp/test\r.db",
+			wantErr: true,
+		},
+		{
+			name:    "double quote injection",
+			path:    `/tmp/test".db`,
+			wantErr: true,
+		},
+		{
+			name:    "sql injection attempt",
+			path:    `/tmp/x"; DROP TABLE kv; --`,
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateSQLitePath(tt.path)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("validateSQLitePath() error = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestEscapeSQLiteString(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{
+			name:  "no quotes",
+			input: "/tmp/backup.db",
+			want:  "/tmp/backup.db",
+		},
+		{
+			name:  "single double quote",
+			input: `test"file`,
+			want:  `test""file`,
+		},
+		{
+			name:  "multiple double quotes",
+			input: `test"file"name`,
+			want:  `test""file""name`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := escapeSQLiteString(tt.input)
+			if got != tt.want {
+				t.Errorf("escapeSQLiteString() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}

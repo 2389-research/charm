@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 
 	_ "modernc.org/sqlite"
 )
@@ -164,7 +165,16 @@ func sqliteBackup(srcPath string, w io.Writer) error {
 	// Use VACUUM INTO to create a consistent snapshot.
 	// This is safe with concurrent writes because VACUUM INTO takes a read lock
 	// and creates a transactionally consistent point-in-time snapshot.
-	_, err = src.Exec(fmt.Sprintf("VACUUM INTO '%s'", tmpPath))
+	//
+	// SQLite's VACUUM INTO doesn't support parameter binding, so we must
+	// validate the path to prevent SQL injection. The path comes from
+	// os.CreateTemp which generates safe filenames, but we validate anyway.
+	if err := validateSQLitePath(tmpPath); err != nil {
+		return fmt.Errorf("unsafe backup path: %w", err)
+	}
+	// Use double quotes per SQLite standard for identifiers/paths
+	query := fmt.Sprintf(`VACUUM INTO "%s"`, escapeSQLiteString(tmpPath))
+	_, err = src.Exec(query)
 	if err != nil {
 		return fmt.Errorf("failed to vacuum into temp file: %w", err)
 	}
@@ -196,4 +206,33 @@ func sqliteRestore(r io.Reader, dstPath string) error {
 	}
 
 	return nil
+}
+
+// validateSQLitePath ensures the path doesn't contain SQL injection attempts.
+// Checks for dangerous characters that could break out of quoted strings.
+//
+//nolint:unused // Used by sqliteBackup which is marked unused pending kv.go integration
+func validateSQLitePath(path string) error {
+	// Check for null bytes (path traversal/injection)
+	if strings.Contains(path, "\x00") {
+		return fmt.Errorf("path contains null byte")
+	}
+	// Check for newlines (SQL injection)
+	if strings.ContainsAny(path, "\n\r") {
+		return fmt.Errorf("path contains newline characters")
+	}
+	// Check for quote characters that could break out of quoting
+	if strings.Contains(path, `"`) {
+		return fmt.Errorf("path contains double quotes")
+	}
+	return nil
+}
+
+// escapeSQLiteString escapes a string for use in SQLite.
+// This is defense-in-depth since validateSQLitePath already blocks quotes.
+//
+//nolint:unused // Used by sqliteBackup which is marked unused pending kv.go integration
+func escapeSQLiteString(s string) string {
+	// In SQLite, double quotes in identifiers are escaped by doubling them
+	return strings.ReplaceAll(s, `"`, `""`)
 }

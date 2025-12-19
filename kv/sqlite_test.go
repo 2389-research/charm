@@ -141,3 +141,37 @@ func TestSQLiteKeysEmpty(t *testing.T) {
 		t.Error("Keys returned nil instead of empty slice")
 	}
 }
+
+func TestSQLiteMeta(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+
+	db, err := openSQLite(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open sqlite: %v", err)
+	}
+	defer db.Close()
+
+	// Test get on missing key returns 0
+	val, err := sqliteGetMeta(db, "max_version")
+	if err != nil {
+		t.Fatalf("GetMeta failed: %v", err)
+	}
+	if val != 0 {
+		t.Errorf("GetMeta on missing key returned %d, want 0", val)
+	}
+
+	// Test set
+	if err := sqliteSetMeta(db, "max_version", 42); err != nil {
+		t.Fatalf("SetMeta failed: %v", err)
+	}
+
+	// Test get returns set value
+	val, err = sqliteGetMeta(db, "max_version")
+	if err != nil {
+		t.Fatalf("GetMeta failed: %v", err)
+	}
+	if val != 42 {
+		t.Errorf("GetMeta returned %d, want 42", val)
+	}
+}

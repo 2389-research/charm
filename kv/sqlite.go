@@ -107,3 +107,29 @@ func sqliteKeys(db *sql.DB) ([][]byte, error) {
 	}
 	return keys, nil
 }
+
+// sqliteGetMeta retrieves a metadata value. Returns 0 if not found.
+//
+//nolint:unused // Will be used in kv.go integration
+func sqliteGetMeta(db *sql.DB, name string) (int64, error) {
+	var value int64
+	err := db.QueryRow("SELECT value FROM meta WHERE name = ?", name).Scan(&value)
+	if err == sql.ErrNoRows {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, fmt.Errorf("failed to get meta %s: %w", name, err)
+	}
+	return value, nil
+}
+
+// sqliteSetMeta stores a metadata value.
+//
+//nolint:unused // Will be used in kv.go integration
+func sqliteSetMeta(db *sql.DB, name string, value int64) error {
+	_, err := db.Exec("INSERT OR REPLACE INTO meta (name, value) VALUES (?, ?)", name, value)
+	if err != nil {
+		return fmt.Errorf("failed to set meta %s: %w", name, err)
+	}
+	return nil
+}

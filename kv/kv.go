@@ -111,6 +111,34 @@ func (kv *KV) IsReadOnly() bool {
 	return kv.readOnly
 }
 
+// OpenWithFallback opens a Charm Cloud managed Badger DB instance, automatically
+// falling back to read-only mode if another process holds the lock.
+// Use IsReadOnly() to check which mode was used.
+func OpenWithFallback(cc *client.Client, name string, opt badger.Options) (*KV, error) {
+	kv, err := Open(cc, name, opt)
+	if err == nil {
+		return kv, nil
+	}
+	if IsLocked(err) {
+		return OpenReadOnly(cc, name, opt)
+	}
+	return nil, err
+}
+
+// OpenWithDefaultsFallback opens a Charm Cloud managed Badger DB instance with
+// default settings, automatically falling back to read-only mode if another
+// process holds the lock. Use IsReadOnly() to check which mode was used.
+func OpenWithDefaultsFallback(name string) (*KV, error) {
+	kv, err := OpenWithDefaults(name)
+	if err == nil {
+		return kv, nil
+	}
+	if IsLocked(err) {
+		return OpenWithDefaultsReadOnly(name)
+	}
+	return nil, err
+}
+
 // OptionsWithEncryption returns badger.Options with all required encryption
 // settings enabled for a given encryption key.
 func OptionsWithEncryption(opt badger.Options, encKey []byte, cacheSize int64) (badger.Options, error) {

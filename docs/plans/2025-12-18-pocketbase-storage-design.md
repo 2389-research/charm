@@ -16,24 +16,23 @@ Replace Charm server's SQLite and LocalFileStore backends with embedded PocketBa
 
 ## PocketBase Collections
 
-### Built-in `users` Collection (Extended)
+All collections use `core.NewBaseCollection()` - we do not use PocketBase's auth collection since Charm users are created automatically on SSH key connection without credentials.
 
-| Field | Type | Notes |
-|-------|------|-------|
-| `charm_id` | text, unique | UUID for Charm identity |
-| `name` | text, unique nullable | Display name |
-| `bio` | text | User bio |
-
-### Custom Collections
+### Collections
 
 | Collection | Fields | Notes |
 |------------|--------|-------|
-| `public_keys` | `user` (relation→users), `public_key` (text) | SSH keys, unique on user+key |
+| `charm_users` | `charm_id` (text, unique), `name` (text, unique nullable), `email` (text), `bio` (text) | Charm user accounts |
+| `public_keys` | `user` (relation→charm_users), `public_key` (text) | SSH keys, unique on user+key |
 | `encrypt_keys` | `public_key` (relation→public_keys), `global_id` (text), `encrypted_key` (text) | Device encryption keys |
-| `named_seqs` | `user` (relation→users), `name` (text), `seq` (number) | User-scoped counters |
+| `named_seqs` | `user` (relation→charm_users), `name` (text), `seq` (number) | User-scoped counters |
 | `news` | `subject` (text), `body` (text), `tags` (json) | Server announcements |
 | `tokens` | `pin` (text, unique) | Temporary link tokens |
-| `charm_files` | `user` (relation→users), `path` (text), `file` (file), `mode` (number) | User files, unique on user+path |
+| `charm_files` | `charm_id` (text), `path` (text), `file` (file, optional), `is_dir` (bool), `mode` (number) | User files, unique on charm_id+path |
+
+### Directory Support
+
+Directories are stored as records with `is_dir: true` and no file attachment. The `Get` method returns JSON directory listings for directory records, matching current LocalFileStore behavior.
 
 ## Package Structure
 
@@ -66,16 +65,23 @@ server/
 
 ### db.DB Interface
 
-All methods query PocketBase collections via the Go SDK instead of raw SQL.
+All methods query PocketBase collections via the Go SDK instead of raw SQL. PocketBase's `app.RunInTransaction()` replaces the custom SQLite transaction wrapper.
 
 ### storage.FileStore Interface
 
 | Method | PocketBase Operation |
 |--------|---------------------|
-| `Stat(charmID, path)` | Query `charm_files` by user+path, return metadata |
+| `Stat(charmID, path)` | Query `charm_files` by charm_id+path, return metadata |
 | `Get(charmID, path)` | Query record, return file via filesystem API |
 | `Put(charmID, path, r, mode)` | Upsert record with file upload |
 | `Delete(charmID, path)` | Delete record (auto-deletes file) |
+
+### fs.File Wrapper
+
+The `Get` method must return `fs.File`. Create wrapper types:
+
+- `PocketbaseFile` - wraps PocketBase file response, implements `Read`, `Close`, `Stat`
+- Reuse existing `charmfs.DirFile` for directory listings (returns JSON)
 
 ## Configuration
 

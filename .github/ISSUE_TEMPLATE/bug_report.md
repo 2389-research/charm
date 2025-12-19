@@ -25,7 +25,7 @@ Steps to reproduce the behavior:
 4. See error
 
 **Source Code**
-Please include source code if needed to reproduce the behavior. 
+Please include source code if needed to reproduce the behavior.
 
 **Expected behavior**
 A clear and concise description of what you expected to happen.

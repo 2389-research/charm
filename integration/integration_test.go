@@ -17,6 +17,7 @@ import (
 	charmfs "github.com/charmbracelet/charm/fs"
 	"github.com/charmbracelet/charm/kv"
 	"github.com/charmbracelet/charm/testserver"
+	badger "github.com/dgraph-io/badger/v3"
 )
 
 // =============================================================================
@@ -1029,6 +1030,217 @@ func TestE2E_Workflow_FullUserJourney(t *testing.T) {
 	t.Log("Step 5: KV operations completed")
 
 	t.Log("Full user journey completed successfully!")
+}
+
+// =============================================================================
+// KV Sync Tests (cross-device sync simulation)
+// =============================================================================
+
+func TestE2E_KV_OverwriteSyncsToCloud(t *testing.T) {
+	// This test reproduces the bug where kv.Set() overwrites don't sync to cloud.
+	// See BBS thread: "BUG: kv.Set() overwrites don't sync to cloud"
+	//
+	// Scenario:
+	// 1. Machine A: Set key=value1, sync to cloud
+	// 2. Machine B: Sync from cloud, verify value1
+	// 3. Machine A: Overwrite key=value2, sync to cloud
+	// 4. Machine B: Sync from cloud, should see value2 (BUG: sees value1)
+	if raceEnabled {
+		t.Skip("skipping KV test with race detector: BadgerDB has known internal races")
+	}
+
+	cl := setupClient(t)
+	mustAuth(t, cl)
+
+	dbName := "test-overwrite-sync"
+	key := []byte("sync-test-key")
+	value1 := []byte("initial-value")
+	value2 := []byte("updated-value")
+
+	// Create two separate local paths to simulate two machines
+	machineAPath := t.TempDir()
+	machineBPath := t.TempDir()
+
+	// --- Machine A: Set initial value ---
+	dbA, err := openKVAtPath(cl, dbName, machineAPath)
+	if err != nil {
+		t.Fatalf("Machine A: OpenKV failed: %v", err)
+	}
+
+	err = dbA.Set(key, value1)
+	if err != nil {
+		dbA.Close()
+		t.Fatalf("Machine A: Set initial value failed: %v", err)
+	}
+	dbA.Close()
+
+	// --- Machine B: Sync and verify initial value ---
+	dbB, err := openKVAtPath(cl, dbName, machineBPath)
+	if err != nil {
+		t.Fatalf("Machine B: OpenKV failed: %v", err)
+	}
+
+	err = dbB.Sync()
+	if err != nil {
+		dbB.Close()
+		t.Fatalf("Machine B: Sync failed: %v", err)
+	}
+
+	gotValue, err := dbB.Get(key)
+	if err != nil {
+		dbB.Close()
+		t.Fatalf("Machine B: Get after sync failed: %v", err)
+	}
+
+	if !bytes.Equal(gotValue, value1) {
+		dbB.Close()
+		t.Fatalf("Machine B: Expected %q, got %q", value1, gotValue)
+	}
+	t.Logf("Machine B: Verified initial value %q", value1)
+	dbB.Close()
+
+	// --- Machine A: Overwrite with new value ---
+	dbA2, err := openKVAtPath(cl, dbName, machineAPath)
+	if err != nil {
+		t.Fatalf("Machine A (reopened): OpenKV failed: %v", err)
+	}
+
+	err = dbA2.Set(key, value2)
+	if err != nil {
+		dbA2.Close()
+		t.Fatalf("Machine A: Set updated value failed: %v", err)
+	}
+
+	// Verify local overwrite worked
+	localValue, err := dbA2.Get(key)
+	if err != nil {
+		dbA2.Close()
+		t.Fatalf("Machine A: Get after overwrite failed: %v", err)
+	}
+	if !bytes.Equal(localValue, value2) {
+		dbA2.Close()
+		t.Fatalf("Machine A: Local overwrite failed, expected %q, got %q", value2, localValue)
+	}
+	t.Logf("Machine A: Local overwrite confirmed %q", value2)
+	dbA2.Close()
+
+	// --- Machine B: Sync and verify updated value (incremental) ---
+	dbB2, err := openKVAtPath(cl, dbName, machineBPath)
+	if err != nil {
+		t.Fatalf("Machine B (reopened): OpenKV failed: %v", err)
+	}
+
+	err = dbB2.Sync()
+	if err != nil {
+		dbB2.Close()
+		t.Fatalf("Machine B: Second sync failed: %v", err)
+	}
+
+	gotValue2, err := dbB2.Get(key)
+	if err != nil {
+		dbB2.Close()
+		t.Fatalf("Machine B: Get after second sync failed: %v", err)
+	}
+
+	if !bytes.Equal(gotValue2, value2) {
+		dbB2.Close()
+		t.Errorf("Incremental sync failed: Machine B should see %q but got %q", value2, gotValue2)
+	} else {
+		t.Logf("Machine B: Incremental sync OK - got %q", value2)
+	}
+	dbB2.Close()
+
+	// --- Machine C: Fresh sync from scratch (simulates "wipe and sync") ---
+	// THIS IS WHERE THE BUG MANIFESTS according to the report
+	machineCPath := t.TempDir()
+	dbC, err := openKVAtPath(cl, dbName, machineCPath)
+	if err != nil {
+		t.Fatalf("Machine C: OpenKV failed: %v", err)
+	}
+	defer dbC.Close()
+
+	err = dbC.Sync()
+	if err != nil {
+		t.Fatalf("Machine C: Sync failed: %v", err)
+	}
+
+	gotValue3, err := dbC.Get(key)
+	if err != nil {
+		t.Fatalf("Machine C: Get after fresh sync failed: %v", err)
+	}
+
+	// BUG: Fresh machine syncing from scratch might see stale value
+	if !bytes.Equal(gotValue3, value2) {
+		t.Errorf("BUG CONFIRMED: Fresh sync from scratch - Machine C should see %q but got %q (overwrite didn't sync)", value2, gotValue3)
+	} else {
+		t.Logf("Machine C: Fresh sync OK - got %q", value2)
+	}
+}
+
+// openKVAtPath opens a KV database at a specific local path for testing.
+// This allows simulating multiple machines with separate local storage
+// but syncing to the same cloud database.
+func openKVAtPath(cl *client.Client, name, localPath string) (*kv.KV, error) {
+	pn := filepath.Join(localPath, "kv", name)
+	opts := badger.DefaultOptions(pn).WithLoggingLevel(badger.ERROR)
+	opts.Logger = nil
+	opts = opts.WithValueLogFileSize(10000000)
+	return kv.Open(cl, name, opts)
+}
+
+func TestE2E_KV_MultipleOverwriteSync(t *testing.T) {
+	// Test multiple consecutive overwrites to see if any are lost
+	if raceEnabled {
+		t.Skip("skipping KV test with race detector: BadgerDB has known internal races")
+	}
+
+	cl := setupClient(t)
+	mustAuth(t, cl)
+
+	dbName := "test-multi-overwrite"
+	key := []byte("counter")
+	machineAPath := t.TempDir()
+
+	// Machine A: Write 5 sequential values
+	db, err := openKVAtPath(cl, dbName, machineAPath)
+	if err != nil {
+		t.Fatalf("OpenKV failed: %v", err)
+	}
+	for i := 1; i <= 5; i++ {
+		value := []byte(fmt.Sprintf("value-%d", i))
+		err = db.Set(key, value)
+		if err != nil {
+			db.Close()
+			t.Fatalf("Iteration %d: Set failed: %v", i, err)
+		}
+		t.Logf("Machine A: Set %q", value)
+	}
+	db.Close()
+
+	// Machine B: Fresh sync should see the final value
+	machineBPath := t.TempDir()
+	dbB, err := openKVAtPath(cl, dbName, machineBPath)
+	if err != nil {
+		t.Fatalf("Machine B: OpenKV failed: %v", err)
+	}
+	defer dbB.Close()
+
+	err = dbB.Sync()
+	if err != nil {
+		t.Fatalf("Machine B: Sync failed: %v", err)
+	}
+
+	gotValue, err := dbB.Get(key)
+	if err != nil {
+		t.Fatalf("Machine B: Get failed: %v", err)
+	}
+
+	expected := []byte("value-5")
+	if !bytes.Equal(gotValue, expected) {
+		t.Errorf("BUG: Machine B should see %q but got %q", expected, gotValue)
+	} else {
+		t.Logf("Machine B: Fresh sync correctly got %q after 5 overwrites", gotValue)
+	}
 }
 
 // =============================================================================

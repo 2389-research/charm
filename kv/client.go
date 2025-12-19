@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io/fs"
 	"math"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -136,17 +137,31 @@ func (kv *KV) syncFrom(mv uint64) error {
 	if err != nil {
 		return err
 	}
+
+	// Collect sequence numbers to restore
+	var seqs []uint64
 	for _, de := range seqDir {
-		ii, err := strconv.Atoi(de.Name())
+		seq, err := strconv.ParseUint(de.Name(), 10, 64)
+		if err != nil {
+			return fmt.Errorf("invalid sequence file name %q: %w", de.Name(), err)
+		}
+		if seq > mv {
+			seqs = append(seqs, seq)
+		}
+	}
+
+	// Sort by sequence number to ensure backups are applied in order.
+	// This is critical for overwrites: if backup 2 overwrites a key from
+	// backup 1, we must restore backup 1 first, then backup 2.
+	sort.Slice(seqs, func(i, j int) bool {
+		return seqs[i] < seqs[j]
+	})
+
+	// Restore in sequence order
+	for _, seq := range seqs {
+		err = kv.restoreSeq(seq)
 		if err != nil {
 			return err
-		}
-		i := uint64(ii)
-		if i > mv {
-			err = kv.restoreSeq(i)
-			if err != nil {
-				return err
-			}
 		}
 	}
 	return nil

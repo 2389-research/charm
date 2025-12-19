@@ -111,20 +111,49 @@ func (kv *KV) Sync() error {
 
 // Commit commits a *badger.Txn and syncs the diff to the Charm Cloud.
 func (kv *KV) Commit(txn *badger.Txn, callback func(error)) error {
+	// First sync any remote changes
 	mv := kv.DB.MaxVersion()
 	err := kv.syncFrom(mv)
 	if err != nil {
 		return err
 	}
+
 	seq, err := kv.nextSeq(kv.name)
 	if err != nil {
 		return err
 	}
-	err = txn.CommitAt(seq, callback)
+
+	// CommitAt is async - use a channel to wait for completion
+	// before backing up, ensuring the data is visible to Backup.
+	commitDone := make(chan error, 1)
+	err = txn.CommitAt(seq, func(commitErr error) {
+		commitDone <- commitErr
+	})
 	if err != nil {
 		return err
 	}
-	return kv.backupSeq(mv, seq)
+
+	// Wait for commit to complete before backing up
+	if commitErr := <-commitDone; commitErr != nil {
+		if callback != nil {
+			callback(commitErr)
+		}
+		return commitErr
+	}
+
+	// Always do a full backup (from version 0) to work around managed mode
+	// visibility issues where Stream.Backup doesn't see recently committed entries.
+	// This is less efficient but ensures all data is backed up correctly.
+	// TODO: Investigate Badger managed mode backup visibility issue and potentially
+	// file an upstream bug report or find a more efficient solution.
+	backupErr := kv.backupSeq(0, seq)
+
+	// Call user callback after both commit and backup are complete
+	if callback != nil {
+		callback(backupErr)
+	}
+
+	return backupErr
 }
 
 // Close closes the underlying Badger DB.

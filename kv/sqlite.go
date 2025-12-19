@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 
 	_ "modernc.org/sqlite"
 )
@@ -137,7 +138,9 @@ func sqliteSetMeta(db *sql.DB, name string, value int64) error {
 }
 
 // sqliteBackup creates a backup of the database to the writer.
-// Uses WAL checkpoint to ensure all data is in the main database file.
+// Uses VACUUM INTO to create a consistent snapshot that is safe even with
+// concurrent writers. VACUUM INTO creates a transactionally consistent copy
+// in a single atomic operation.
 //
 //nolint:unused // Will be used in kv.go integration
 func sqliteBackup(srcPath string, w io.Writer) error {
@@ -148,15 +151,28 @@ func sqliteBackup(srcPath string, w io.Writer) error {
 	}
 	defer func() { _ = src.Close() }()
 
-	// Checkpoint WAL to ensure all data is in main file
-	if _, err := src.Exec("PRAGMA wal_checkpoint(TRUNCATE)"); err != nil {
-		return fmt.Errorf("failed to checkpoint WAL: %w", err)
+	// Create temporary file for VACUUM INTO output
+	tmpDir := filepath.Dir(srcPath)
+	tmpFile, err := os.CreateTemp(tmpDir, "backup-*.db")
+	if err != nil {
+		return fmt.Errorf("failed to create temp backup file: %w", err)
+	}
+	tmpPath := tmpFile.Name()
+	_ = tmpFile.Close()
+	defer func() { _ = os.Remove(tmpPath) }()
+
+	// Use VACUUM INTO to create a consistent snapshot.
+	// This is safe with concurrent writes because VACUUM INTO takes a read lock
+	// and creates a transactionally consistent point-in-time snapshot.
+	_, err = src.Exec(fmt.Sprintf("VACUUM INTO '%s'", tmpPath))
+	if err != nil {
+		return fmt.Errorf("failed to vacuum into temp file: %w", err)
 	}
 
-	// Read the database file
-	data, err := os.ReadFile(srcPath)
+	// Read the consistent backup file
+	data, err := os.ReadFile(tmpPath)
 	if err != nil {
-		return fmt.Errorf("failed to read database file: %w", err)
+		return fmt.Errorf("failed to read backup file: %w", err)
 	}
 
 	if _, err := w.Write(data); err != nil {

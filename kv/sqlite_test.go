@@ -103,4 +103,41 @@ func TestSQLiteKeys(t *testing.T) {
 	if len(got) != len(keys) {
 		t.Errorf("Keys returned %d keys, want %d", len(got), len(keys))
 	}
+
+	// Verify actual key contents
+	keyMap := make(map[string]bool)
+	for _, k := range got {
+		keyMap[string(k)] = true
+	}
+
+	for _, expected := range keys {
+		if !keyMap[string(expected)] {
+			t.Errorf("Keys missing expected key %q", expected)
+		}
+	}
+}
+
+func TestSQLiteKeysEmpty(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+
+	db, err := openSQLite(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open sqlite: %v", err)
+	}
+	defer db.Close()
+
+	// Get keys from empty database
+	got, err := sqliteKeys(db)
+	if err != nil {
+		t.Fatalf("Keys failed on empty database: %v", err)
+	}
+
+	if len(got) != 0 {
+		t.Errorf("Keys returned %d keys from empty database, want 0", len(got))
+	}
+
+	if got == nil {
+		t.Error("Keys returned nil instead of empty slice")
+	}
 }

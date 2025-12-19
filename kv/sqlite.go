@@ -84,6 +84,7 @@ func sqliteDelete(db *sql.DB, key []byte) error {
 }
 
 // sqliteKeys returns all keys in the database.
+// Returns an empty slice (not nil) if no keys exist.
 //
 //nolint:unused // Will be used in kv.go integration
 func sqliteKeys(db *sql.DB) ([][]byte, error) {
@@ -93,7 +94,7 @@ func sqliteKeys(db *sql.DB) ([][]byte, error) {
 	}
 	defer func() { _ = rows.Close() }()
 
-	var keys [][]byte
+	keys := make([][]byte, 0)
 	for rows.Next() {
 		var key []byte
 		if err := rows.Scan(&key); err != nil {

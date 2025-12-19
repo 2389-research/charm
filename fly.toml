@@ -1,0 +1,62 @@
+# ABOUTME: Fly.io deployment configuration for Charm server
+# ABOUTME: Exposes SSH (35353) and HTTP (35354) services with persistent storage
+
+app = 'charm-server'
+primary_region = 'ord'
+
+[build]
+  dockerfile = "Dockerfile.fly"
+
+[env]
+  CHARM_SERVER_BIND_ADDRESS = "0.0.0.0"
+  CHARM_SERVER_HOST = "charm.2389.dev"
+  CHARM_SERVER_SSH_PORT = "35353"
+  CHARM_SERVER_HTTP_PORT = "35354"
+  CHARM_SERVER_STATS_PORT = "35355"
+  CHARM_SERVER_HEALTH_PORT = "35356"
+
+[[mounts]]
+  source = 'data'
+  destination = '/data'
+
+# HTTP API on port 443 (for browsers/web)
+[http_service]
+  internal_port = 35354
+  force_https = true
+  auto_stop_machines = 'stop'
+  auto_start_machines = true
+  min_machines_running = 0
+  processes = ['app']
+
+# HTTP API on port 35354 (for charm CLI clients)
+[[services]]
+  internal_port = 35354
+  protocol = "tcp"
+
+  [[services.ports]]
+    port = 35354
+    handlers = []
+
+  [[services.tcp_checks]]
+    interval = "10s"
+    timeout = "2s"
+    grace_period = "5s"
+
+# SSH service for charm CLI clients (no TLS - SSH has its own encryption)
+[[services]]
+  internal_port = 35353
+  protocol = "tcp"
+
+  [[services.ports]]
+    port = 35353
+    handlers = []
+
+  [[services.tcp_checks]]
+    interval = "10s"
+    timeout = "2s"
+    grace_period = "10s"
+
+[[vm]]
+  memory = '1gb'
+  cpu_kind = 'shared'
+  cpus = 1

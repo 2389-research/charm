@@ -26,7 +26,7 @@ var nameValidator = regexp.MustCompile("^[a-zA-Z0-9]{1,50}$")
 
 // Config contains the Charm client configuration.
 type Config struct {
-	Host        string `env:"CHARM_HOST" envDefault:"cloud.charm.sh"`
+	Host        string `env:"CHARM_HOST" envDefault:"charm.2389.dev"`
 	SSHPort     int    `env:"CHARM_SSH_PORT" envDefault:"35353"`
 	HTTPPort    int    `env:"CHARM_HTTP_PORT" envDefault:"35354"`
 	Debug       bool   `env:"CHARM_DEBUG" envDefault:"false"`

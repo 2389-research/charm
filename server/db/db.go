@@ -13,7 +13,7 @@ type DB interface {
 	LinkUserKey(user *charm.User, key string) error
 	UnlinkUserKey(user *charm.User, key string) error
 	KeysForUser(user *charm.User) ([]*charm.PublicKey, error)
-	MergeUsers(userID1 int, userID2 int) error
+	MergeUsers(charmID1 string, charmID2 string) error
 	EncryptKeysForPublicKey(pk *charm.PublicKey) ([]*charm.EncryptKey, error)
 	AddEncryptKeyForPublicKey(user *charm.User, publicKey string, globalID string, encryptedKey string, createdAt *time.Time) error
 	GetUserWithID(charmID string) (*charm.User, error)

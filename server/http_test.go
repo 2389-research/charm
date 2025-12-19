@@ -13,7 +13,7 @@ func TestHTTPAccess(t *testing.T) {
 		t.Fatalf("auth error: %s", err)
 	}
 
-	_, err = cl.AuthedRawRequest("GET", "/v1/fs/../../db/charm_sqlite.db")
+	_, err = cl.AuthedRawRequest("GET", "/v1/fs/../../pb_data/data.db")
 	if err == nil {
 		t.Fatalf("expected access error, got nil")
 	}

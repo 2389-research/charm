@@ -2,7 +2,7 @@
 # ABOUTME: Builds the Go binary from source and creates a minimal runtime image
 
 # Build stage
-FROM golang:1.23-alpine AS builder
+FROM golang:1.24-alpine AS builder
 
 RUN apk add --no-cache git
 
@@ -34,6 +34,8 @@ EXPOSE 35354/tcp
 EXPOSE 35355/tcp
 # Health
 EXPOSE 35356/tcp
+# PocketBase Admin UI
+EXPOSE 35357/tcp
 
 ENTRYPOINT ["/usr/local/bin/charm"]
 CMD ["serve"]

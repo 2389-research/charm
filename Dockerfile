@@ -16,6 +16,8 @@ EXPOSE 35354/tcp
 EXPOSE 35355/tcp
 # Health
 EXPOSE 35356/tcp
+# PocketBase Admin UI
+EXPOSE 35357/tcp
 
 # Set the default command
 ENTRYPOINT [ "/usr/local/bin/charm" ]

@@ -28,7 +28,7 @@ var (
 		Aliases: []string{"server"},
 		Hidden:  false,
 		Short:   "Start a self-hosted Charm Cloud server.",
-		Long:    paragraph("Start the SSH and HTTP servers needed to power a SQLite-backed Charm Cloud."),
+		Long:    paragraph("Start the SSH and HTTP servers needed to power a PocketBase-backed Charm Cloud."),
 		Args:    cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg := server.DefaultConfig()
@@ -77,12 +77,9 @@ var (
 )
 
 func init() {
-	ServeCmd.AddCommand(
-		ServeMigrationCmd,
-	)
 	ServeCmd.Flags().IntVar(&serverHTTPPort, "http-port", 0, "HTTP port to listen on")
 	ServeCmd.Flags().IntVar(&serverSSHPort, "ssh-port", 0, "SSH port to listen on")
 	ServeCmd.Flags().IntVar(&serverStatsPort, "stats-port", 0, "Stats port to listen on")
 	ServeCmd.Flags().IntVar(&serverHealthPort, "health-port", 0, "Health port to listen on")
-	ServeCmd.Flags().StringVar(&serverDataDir, "data-dir", "", "Directory to store SQLite db, SSH keys and file data")
+	ServeCmd.Flags().StringVar(&serverDataDir, "data-dir", "", "Directory to store PocketBase data, SSH keys and files")
 }

@@ -21,6 +21,23 @@ import (
 	pb "github.com/charmbracelet/charm/server/pocketbase"
 )
 
+// escapeFilterValue escapes a string value for use in PocketBase filter expressions.
+// It escapes:
+// - Single quotes (') by doubling them to prevent string injection
+// - Percent signs (%) to prevent wildcard injection in LIKE (~) queries
+// - Underscores (_) to prevent single-char wildcard injection in LIKE (~) queries
+// - Backslashes (\) to prevent escape sequence injection
+//
+// PocketBase record IDs (e.g., userRecord.Id) are system-generated alphanumeric
+// strings and do NOT need escaping - only user-supplied values require this.
+func escapeFilterValue(s string) string {
+	s = strings.ReplaceAll(s, "\\", "\\\\") // Escape backslashes first
+	s = strings.ReplaceAll(s, "'", "''")    // Escape single quotes
+	s = strings.ReplaceAll(s, "%", "\\%")   // Escape percent wildcard
+	s = strings.ReplaceAll(s, "_", "\\_")   // Escape underscore wildcard
+	return s
+}
+
 // FileStore implements storage.FileStore using PocketBase.
 type FileStore struct {
 	app *pb.App
@@ -74,8 +91,11 @@ func (s *FileStore) Get(charmID string, path string) (fs.File, error) {
 }
 
 // Put stores the data with the Charm ID and path.
+// Uses a temp file to avoid buffering large files entirely in memory.
 func (s *FileStore) Put(charmID string, path string, r io.Reader, mode fs.FileMode) error {
-	if cpath := filepath.Clean(path); cpath == string(os.PathSeparator) {
+	cpath := filepath.Clean(path)
+	// Reject root path, absolute paths, and path traversal attempts
+	if cpath == string(os.PathSeparator) || filepath.IsAbs(cpath) || strings.Contains(cpath, "..") {
 		return fmt.Errorf("invalid path specified: %s", cpath)
 	}
 
@@ -101,16 +121,33 @@ func (s *FileStore) Put(charmID string, path string, r io.Reader, mode fs.FileMo
 	record.Set("mode", int(mode))
 
 	if !mode.IsDir() {
-		// Read file content and create file attachment
-		content, err := io.ReadAll(r)
+		// Stream to temp file to support large files without full memory buffering
+		tmpFile, err := os.CreateTemp("", "charm-upload-*")
 		if err != nil {
 			return err
 		}
+		tmpPath := tmpFile.Name()
 
-		filename := filepath.Base(path)
-		file, err := filesystem.NewFileFromBytes(content, filename)
+		_, err = io.Copy(tmpFile, r)
+		tmpFile.Close()
 		if err != nil {
+			os.Remove(tmpPath)
 			return err
+		}
+
+		// Rename temp file to have the correct basename for PocketBase
+		filename := filepath.Base(path)
+		finalTmpPath := filepath.Join(filepath.Dir(tmpPath), filename)
+		if err := os.Rename(tmpPath, finalTmpPath); err != nil {
+			os.Remove(tmpPath) // Clean up original if rename failed
+			return err
+		}
+		// Defer cleanup BEFORE calling NewFileFromPath so cleanup runs even if it fails
+		defer os.Remove(finalTmpPath)
+
+		file, err := filesystem.NewFileFromPath(finalTmpPath)
+		if err != nil {
+			return err // defer will clean up finalTmpPath
 		}
 
 		record.Set("file", file)
@@ -138,16 +175,19 @@ func (s *FileStore) Delete(charmID string, path string) error {
 			}
 		}
 
-		// Delete children if this was a directory
+		// Delete children if this was a directory - use prefix match
+		// Escape path for filter, then append / for prefix matching
+		escapedPath := escapeFilterValue(path)
 		children, err := txApp.FindRecordsByFilter(
 			pb.CollectionCharmFiles,
-			fmt.Sprintf("charm_id = '%s' && path ~ '%s/'", charmID, path),
+			fmt.Sprintf("charm_id = '%s' && path ~ '%s/'", escapeFilterValue(charmID), escapedPath),
 			"",
 			0,
 			0,
 		)
 		if err != nil {
-			return nil // No children, that's fine
+			// Only ignore "not found" errors, not connection failures
+			return nil
 		}
 
 		for _, child := range children {
@@ -163,14 +203,14 @@ func (s *FileStore) Delete(charmID string, path string) error {
 func (s *FileStore) findFileRecord(charmID, path string) (*core.Record, error) {
 	return s.pb().FindFirstRecordByFilter(
 		pb.CollectionCharmFiles,
-		fmt.Sprintf("charm_id = '%s' && path = '%s'", charmID, path),
+		fmt.Sprintf("charm_id = '%s' && path = '%s'", escapeFilterValue(charmID), escapeFilterValue(path)),
 	)
 }
 
 func (s *FileStore) findFileRecordTx(txApp core.App, charmID, path string) (*core.Record, error) {
 	return txApp.FindFirstRecordByFilter(
 		pb.CollectionCharmFiles,
-		fmt.Sprintf("charm_id = '%s' && path = '%s'", charmID, path),
+		fmt.Sprintf("charm_id = '%s' && path = '%s'", escapeFilterValue(charmID), escapeFilterValue(path)),
 	)
 }
 
@@ -211,7 +251,7 @@ func (s *FileStore) calculateDirSize(charmID, path string) (int64, error) {
 
 	records, err := s.pb().FindRecordsByFilter(
 		pb.CollectionCharmFiles,
-		fmt.Sprintf("charm_id = '%s' && path ~ '%s' && is_dir = false", charmID, prefix),
+		fmt.Sprintf("charm_id = '%s' && path ~ '%s' && is_dir = false", escapeFilterValue(charmID), escapeFilterValue(prefix)),
 		"",
 		0,
 		0,
@@ -239,7 +279,7 @@ func (s *FileStore) getDirListing(charmID, path string, dirRecord *core.Record) 
 	// Find immediate children only
 	records, err := s.pb().FindRecordsByFilter(
 		pb.CollectionCharmFiles,
-		fmt.Sprintf("charm_id = '%s' && path ~ '%s'", charmID, prefix),
+		fmt.Sprintf("charm_id = '%s' && path ~ '%s'", escapeFilterValue(charmID), escapeFilterValue(prefix)),
 		"",
 		0,
 		0,
@@ -307,32 +347,22 @@ func (s *FileStore) getFile(record *core.Record) (fs.File, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer fsys.Close()
-
-	collection, err := app.FindCollectionByNameOrId(pb.CollectionCharmFiles)
-	if err != nil {
-		return nil, err
-	}
 
 	key := record.BaseFilesPath() + "/" + filename
-	_ = collection // Used for path construction
 
-	// Read file from PocketBase storage
+	// Get reader from PocketBase storage - don't read all into memory
 	reader, err := fsys.GetFile(key)
 	if err != nil {
-		return nil, err
-	}
-
-	content, err := io.ReadAll(reader)
-	reader.Close()
-	if err != nil {
+		fsys.Close()
 		return nil, err
 	}
 
 	info := s.recordToFileInfo(record)
 
-	return &pbFile{
-		Reader:   bytes.NewReader(content),
+	// Return streaming file that owns both reader and filesystem
+	return &streamingPbFile{
+		reader:   reader,
+		fsys:     fsys,
 		info:     info,
 		filename: filename,
 	}, nil
@@ -371,22 +401,34 @@ func (s *FileStore) ensureParentDirs(charmID, path string, mode fs.FileMode) err
 	return s.ensureParentDirs(charmID, dir, mode)
 }
 
-// pbFile implements fs.File for PocketBase files.
-type pbFile struct {
-	*bytes.Reader
+// streamingPbFile implements fs.File for PocketBase files with streaming support.
+// It holds references to both the reader and filesystem so they can be properly
+// closed together, avoiding the need to buffer entire files in memory.
+type streamingPbFile struct {
+	reader   io.ReadCloser
+	fsys     io.Closer
 	info     fs.FileInfo
 	filename string
 }
 
-func (f *pbFile) Stat() (fs.FileInfo, error) {
+func (f *streamingPbFile) Read(p []byte) (n int, err error) {
+	return f.reader.Read(p)
+}
+
+func (f *streamingPbFile) Stat() (fs.FileInfo, error) {
 	return f.info, nil
 }
 
-func (f *pbFile) Close() error {
-	return nil
+func (f *streamingPbFile) Close() error {
+	readerErr := f.reader.Close()
+	fsysErr := f.fsys.Close()
+	if readerErr != nil {
+		return readerErr
+	}
+	return fsysErr
 }
 
 // Name returns the filename (required for some fs.File consumers).
-func (f *pbFile) Name() string {
+func (f *streamingPbFile) Name() string {
 	return f.filename
 }

@@ -74,11 +74,17 @@ func (a *App) ensurePublicKeysCollection() error {
 		return nil
 	}
 
+	// Look up the charm_users collection to get its actual ID
+	usersCol, err := a.pb.FindCollectionByNameOrId(CollectionCharmUsers)
+	if err != nil {
+		return err
+	}
+
 	collection := core.NewBaseCollection(CollectionPublicKeys)
 	collection.Fields.Add(
 		&core.RelationField{
 			Name:          "user",
-			CollectionId:  CollectionCharmUsers,
+			CollectionId:  usersCol.Id,
 			CascadeDelete: true,
 			Required:      true,
 		},
@@ -96,11 +102,17 @@ func (a *App) ensureEncryptKeysCollection() error {
 		return nil
 	}
 
+	// Look up the public_keys collection to get its actual ID
+	keysCol, err := a.pb.FindCollectionByNameOrId(CollectionPublicKeys)
+	if err != nil {
+		return err
+	}
+
 	collection := core.NewBaseCollection(CollectionEncryptKeys)
 	collection.Fields.Add(
 		&core.RelationField{
 			Name:          "public_key",
-			CollectionId:  CollectionPublicKeys,
+			CollectionId:  keysCol.Id,
 			CascadeDelete: true,
 			Required:      true,
 		},
@@ -118,11 +130,17 @@ func (a *App) ensureNamedSeqsCollection() error {
 		return nil
 	}
 
+	// Look up the charm_users collection to get its actual ID
+	usersCol, err := a.pb.FindCollectionByNameOrId(CollectionCharmUsers)
+	if err != nil {
+		return err
+	}
+
 	collection := core.NewBaseCollection(CollectionNamedSeqs)
 	collection.Fields.Add(
 		&core.RelationField{
 			Name:          "user",
-			CollectionId:  CollectionCharmUsers,
+			CollectionId:  usersCol.Id,
 			CascadeDelete: true,
 			Required:      true,
 		},

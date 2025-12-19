@@ -91,6 +91,19 @@ func (a *App) StartAsync() {
 	}()
 }
 
+// Close resets PocketBase's bootstrap state.
+// Note: PocketBase doesn't expose a clean shutdown method in its public API.
+// The HTTP server started by StartAsync will continue running until the process
+// terminates. For graceful shutdown, the caller should manage the server lifecycle
+// externally (e.g., via OS signals or context cancellation).
+// This method resets internal state to allow re-bootstrapping if needed.
+func (a *App) Close() error {
+	if a.pb != nil {
+		return a.pb.ResetBootstrapState()
+	}
+	return nil
+}
+
 // OnBeforeServe registers a callback for before serve.
 func (a *App) OnBeforeServe(fn func(e *core.ServeEvent) error) {
 	a.pb.OnServe().BindFunc(func(e *core.ServeEvent) error {

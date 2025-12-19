@@ -6,6 +6,7 @@ package pocketbase
 import (
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/charmbracelet/log"
@@ -15,6 +16,23 @@ import (
 	charm "github.com/charmbracelet/charm/proto"
 	pb "github.com/charmbracelet/charm/server/pocketbase"
 )
+
+// escapeFilterValue escapes a string value for use in PocketBase filter expressions.
+// It escapes:
+// - Single quotes (') by doubling them to prevent string injection
+// - Percent signs (%) to prevent wildcard injection in LIKE (~) queries
+// - Underscores (_) to prevent single-char wildcard injection in LIKE (~) queries
+// - Backslashes (\) to prevent escape sequence injection
+//
+// PocketBase record IDs (e.g., userRecord.Id) are system-generated alphanumeric
+// strings and do NOT need escaping - only user-supplied values require this.
+func escapeFilterValue(s string) string {
+	s = strings.ReplaceAll(s, "\\", "\\\\") // Escape backslashes first
+	s = strings.ReplaceAll(s, "'", "''")    // Escape single quotes
+	s = strings.ReplaceAll(s, "%", "\\%")   // Escape percent wildcard
+	s = strings.ReplaceAll(s, "_", "\\_")   // Escape underscore wildcard
+	return s
+}
 
 // DB implements the db.DB interface using PocketBase.
 type DB struct {
@@ -153,18 +171,16 @@ func (d *DB) UserNameCount() (int, error) {
 }
 
 // MergeUsers merges two users into a single one.
-func (d *DB) MergeUsers(userID1 int, userID2 int) error {
+func (d *DB) MergeUsers(charmID1 string, charmID2 string) error {
 	app := d.pb()
 
 	return app.RunInTransaction(func(txApp core.App) error {
-		// Find both users by their internal ID
-		// Note: We need to find by record ID, not integer ID
-		// This is a simplification - in practice we'd need to map integer IDs
-		user1, err := d.findUserByIntID(txApp, userID1)
+		// Find both users by CharmID
+		user1, err := txApp.FindFirstRecordByData(pb.CollectionCharmUsers, "charm_id", charmID1)
 		if err != nil {
 			return err
 		}
-		user2, err := d.findUserByIntID(txApp, userID2)
+		user2, err := txApp.FindFirstRecordByData(pb.CollectionCharmUsers, "charm_id", charmID2)
 		if err != nil {
 			return err
 		}
@@ -316,7 +332,7 @@ func (d *DB) UnlinkUserKey(user *charm.User, key string) error {
 		// Find and delete the public key
 		pkRecord, err := txApp.FindFirstRecordByFilter(
 			pb.CollectionPublicKeys,
-			fmt.Sprintf("user = '%s' && public_key = '%s'", userRecord.Id, key),
+			fmt.Sprintf("user = '%s' && public_key = '%s'", userRecord.Id, escapeFilterValue(key)),
 		)
 		if err != nil {
 			return err
@@ -433,7 +449,7 @@ func (d *DB) AddEncryptKeyForPublicKey(u *charm.User, pk string, gid string, ek 
 		// Check if encrypt key already exists
 		existing, err := txApp.FindFirstRecordByFilter(
 			pb.CollectionEncryptKeys,
-			fmt.Sprintf("public_key = '%s' && global_id = '%s'", pkRecord.Id, gid),
+			fmt.Sprintf("public_key = '%s' && global_id = '%s'", pkRecord.Id, escapeFilterValue(gid)),
 		)
 		if err == nil && existing != nil {
 			log.Debug("Encrypt key already exists for public key, skipping", "key", gid)
@@ -464,7 +480,7 @@ func (d *DB) GetSeq(u *charm.User, name string) (uint64, error) {
 
 	record, err := d.pb().FindFirstRecordByFilter(
 		pb.CollectionNamedSeqs,
-		fmt.Sprintf("user = '%s' && name = '%s'", userRecord.Id, name),
+		fmt.Sprintf("user = '%s' && name = '%s'", userRecord.Id, escapeFilterValue(name)),
 	)
 	if err != nil {
 		// Create new sequence starting at 1
@@ -487,7 +503,7 @@ func (d *DB) NextSeq(u *charm.User, name string) (uint64, error) {
 
 		record, err := txApp.FindFirstRecordByFilter(
 			pb.CollectionNamedSeqs,
-			fmt.Sprintf("user = '%s' && name = '%s'", userRecord.Id, name),
+			fmt.Sprintf("user = '%s' && name = '%s'", userRecord.Id, escapeFilterValue(name)),
 		)
 		if err != nil {
 			// Create new sequence
@@ -542,7 +558,7 @@ func (d *DB) GetNews(id string) (*charm.News, error) {
 func (d *DB) GetNewsList(tag string, page int) ([]*charm.News, error) {
 	filter := ""
 	if tag != "" {
-		filter = fmt.Sprintf("tags ~ '%s'", tag)
+		filter = fmt.Sprintf("tags ~ '%s'", escapeFilterValue(tag))
 	}
 
 	records, err := d.pb().FindRecordsByFilter(

@@ -8,7 +8,6 @@ import (
 
 	"github.com/charmbracelet/charm/kv"
 	"github.com/charmbracelet/charm/ui/common"
-	badger "github.com/dgraph-io/badger/v3"
 	"github.com/spf13/cobra"
 )
 
@@ -146,36 +145,49 @@ func kvList(_ *cobra.Command, args []string) error {
 	if err := db.Sync(); err != nil {
 		return err
 	}
-	return db.View(func(txn *badger.Txn) error {
-		opts := badger.DefaultIteratorOptions
-		opts.PrefetchSize = 10
-		opts.Reverse = reverseIterate
-		if keysIterate {
-			opts.PrefetchValues = false
-		}
-		it := txn.NewIterator(opts)
-		defer it.Close() //nolint:errcheck
-		for it.Rewind(); it.Valid(); it.Next() {
-			item := it.Item()
-			k := item.Key()
+
+	// Get all keys
+	keys, err := db.Keys()
+	if err != nil {
+		return err
+	}
+
+	// Reverse if needed
+	if reverseIterate {
+		for i := len(keys) - 1; i >= 0; i-- {
+			k := keys[i]
 			if keysIterate {
 				printFromKV(pf, k)
 				continue
 			}
-			err := item.Value(func(v []byte) error {
-				if valuesIterate {
-					printFromKV(pf, v)
-				} else {
-					printFromKV(pf, k, v)
-				}
-				return nil
-			})
+			v, err := db.Get(k)
 			if err != nil {
 				return err
 			}
+			if valuesIterate {
+				printFromKV(pf, v)
+			} else {
+				printFromKV(pf, k, v)
+			}
 		}
-		return nil
-	})
+	} else {
+		for _, k := range keys {
+			if keysIterate {
+				printFromKV(pf, k)
+				continue
+			}
+			v, err := db.Get(k)
+			if err != nil {
+				return err
+			}
+			if valuesIterate {
+				printFromKV(pf, v)
+			} else {
+				printFromKV(pf, k, v)
+			}
+		}
+	}
+	return nil
 }
 
 func kvSync(_ *cobra.Command, args []string) error {

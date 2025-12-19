@@ -4,15 +4,12 @@ import (
 	"bytes"
 	"fmt"
 	"io/fs"
-	"math"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
 
-	"github.com/charmbracelet/charm/client"
 	charm "github.com/charmbracelet/charm/proto"
-	badger "github.com/dgraph-io/badger/v3"
 )
 
 type kvFile struct {
@@ -72,8 +69,7 @@ func (kv *KV) seqStorageKey(seq uint64) string {
 
 func (kv *KV) backupSeq(from uint64, at uint64) error {
 	buf := bytes.NewBuffer(nil)
-	s := kv.DB.NewStreamAt(math.MaxUint64)
-	size, err := s.Backup(buf, from)
+	err := sqliteBackup(kv.dbPath, buf)
 	if err != nil {
 		return err
 	}
@@ -82,7 +78,7 @@ func (kv *KV) backupSeq(from uint64, at uint64) error {
 		data: buf,
 		info: &kvFileInfo{
 			name:    name,
-			size:    int64(size),
+			size:    int64(buf.Len()),
 			mode:    fs.FileMode(0o660),
 			modTime: time.Now(),
 		},
@@ -100,23 +96,24 @@ func (kv *KV) restoreSeq(seq uint64) error {
 		return err
 	}
 	defer r.Close() // nolint:errcheck
-	// nolint: godox
-	// TODO DB.Load() should be called on a database that is not running any
-	// other concurrent transactions while it is running.
-	return kv.DB.Load(r, 1)
-}
 
-func (kv *KV) getSeq(name string) (uint64, error) {
-	var sm *charm.SeqMsg
-	name, err := kv.fs.EncryptPath(name)
-	if err != nil {
-		return 0, err
+	// Close current DB
+	if err := kv.db.Close(); err != nil {
+		return err
 	}
-	err = kv.cc.AuthedJSONRequest("GET", fmt.Sprintf("/v1/seq/%s", name), nil, &sm)
-	if err != nil {
-		return 0, err
+
+	// Restore from backup
+	if err := sqliteRestore(r, kv.dbPath); err != nil {
+		return err
 	}
-	return sm.Seq, nil
+
+	// Reopen DB
+	db, err := openSQLite(kv.dbPath)
+	if err != nil {
+		return err
+	}
+	kv.db = db
+	return nil
 }
 
 func (kv *KV) nextSeq(name string) (uint64, error) {
@@ -165,44 +162,4 @@ func (kv *KV) syncFrom(mv uint64) error {
 		}
 	}
 	return nil
-}
-
-func encryptKeyToBadgerKey(k *charm.EncryptKey) ([]byte, error) {
-	ek := []byte(k.Key)
-	if len(ek) < 32 {
-		return nil, fmt.Errorf("encryption key is too short")
-	}
-	return ek[0:32], nil
-}
-
-func openDB(cc *client.Client, opt badger.Options) (*badger.DB, error) {
-	var db *badger.DB
-	eks, err := cc.EncryptKeys()
-	if err != nil {
-		return nil, err
-	}
-	for _, k := range eks {
-		ek, err := encryptKeyToBadgerKey(k)
-		if err == nil {
-			opt, err = OptionsWithEncryption(opt, ek, 32768)
-			if err != nil {
-				continue
-			}
-			db, err = badger.OpenManaged(opt)
-			if err == nil {
-				break
-			}
-			if err != nil {
-				// Wrap lock errors with helpful message
-				if IsLocked(err) {
-					return nil, &ErrDatabaseLocked{Path: opt.Dir, Err: err}
-				}
-				return nil, err
-			}
-		}
-	}
-	if db == nil {
-		return nil, fmt.Errorf("could not open BadgerDB, bad encrypt keys")
-	}
-	return db, nil
 }

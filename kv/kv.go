@@ -1,93 +1,93 @@
-// Package kv provides a Charm Cloud backed BadgerDB.
+// Package kv provides a Charm Cloud backed key-value store.
 package kv
 
 import (
-	"fmt"
+	"database/sql"
 	"io"
-	"math"
 	"os"
 	"path/filepath"
 
-	"github.com/charmbracelet/log"
-
 	"github.com/charmbracelet/charm/client"
 	"github.com/charmbracelet/charm/fs"
-	badger "github.com/dgraph-io/badger/v3"
 )
 
-// KV provides a Charm Cloud backed BadgerDB key-value store.
+// KV provides a Charm Cloud backed key-value store.
 //
-// KV supports regular Badger transactions, and backs up the data to the Charm
-// Cloud. It will allow for syncing across machines linked with a Charm
-// account. All data is encrypted by Badger on the local disk using a Charm
-// user's encryption keys. Diffs are also encrypted locally before being synced
-// to the Charm Cloud.
+// KV supports cloud sync, backing up the data to the Charm Cloud.
+// It will allow for syncing across machines linked with a Charm account.
+// All data is encrypted on the local disk using a Charm user's encryption keys.
+// Backups are also encrypted locally before being synced to the Charm Cloud.
 type KV struct {
-	DB       *badger.DB
+	db       *sql.DB
+	dbPath   string
 	name     string
 	cc       *client.Client
 	fs       *fs.FS
 	readOnly bool
 }
 
-// Open a Charm Cloud managed Badger DB instance with badger.Options and
-// *client.Client.
-func Open(cc *client.Client, name string, opt badger.Options) (*KV, error) {
-	db, err := openDB(cc, opt)
+// openKV opens a KV store with the given client, name, and read-only mode.
+func openKV(cc *client.Client, name string, readOnly bool) (*KV, error) {
+	// Get data path
+	dd, err := cc.DataPath()
 	if err != nil {
 		return nil, err
 	}
-	fs, err := fs.NewFSWithClient(cc)
+
+	// Build database path
+	kvDir := filepath.Join(dd, "kv")
+	if err := os.MkdirAll(kvDir, 0o700); err != nil {
+		return nil, err
+	}
+	dbPath := filepath.Join(kvDir, name+".db")
+
+	// Open SQLite database
+	db, err := openSQLite(dbPath)
 	if err != nil {
 		return nil, err
 	}
-	return &KV{DB: db, name: name, cc: cc, fs: fs}, nil
+
+	// Create filesystem
+	cfs, err := fs.NewFSWithClient(cc)
+	if err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+
+	return &KV{
+		db:       db,
+		dbPath:   dbPath,
+		name:     name,
+		cc:       cc,
+		fs:       cfs,
+		readOnly: readOnly,
+	}, nil
 }
 
-// OpenWithDefaults opens a Charm Cloud managed Badger DB instance with the
+// Open a Charm Cloud managed key-value store.
+func Open(cc *client.Client, name string) (*KV, error) {
+	return openKV(cc, name, false)
+}
+
+// OpenWithDefaults opens a Charm Cloud managed key-value store with the
 // default settings pulled from environment variables.
 func OpenWithDefaults(name string) (*KV, error) {
 	cc, err := client.NewClientWithDefaults()
 	if err != nil {
 		return nil, err
 	}
-	dd, err := cc.DataPath()
-	if err != nil {
-		return nil, err
-	}
-	pn := filepath.Join(dd, "/kv/", name)
-	opts := badger.DefaultOptions(pn).WithLoggingLevel(badger.ERROR)
-
-	// By default we have no logger as it will interfere with Bubble Tea
-	// rendering. Use Open with custom options to specify one.
-	opts.Logger = nil
-
-	// We default to a 10MB vlog max size (which BadgerDB turns into 20MB vlog
-	// files). The Badger default results in 2GB vlog files, which is quite
-	// large. This will limit the values to 10MB maximum size. If you need more,
-	// please use Open with custom options.
-	opts = opts.WithValueLogFileSize(10000000)
-	return Open(cc, name, opts)
+	return Open(cc, name)
 }
 
-// OpenReadOnly opens a Charm Cloud managed Badger DB instance in read-only mode.
+// OpenReadOnly opens a Charm Cloud managed key-value store in read-only mode.
 // This allows concurrent access when another process holds the write lock.
-// Write operations (Set, Delete, Commit) will return ErrReadOnlyMode.
+// Write operations (Set, Delete) will return ErrReadOnlyMode.
 // Cloud sync is disabled in read-only mode.
-func OpenReadOnly(cc *client.Client, name string, opt badger.Options) (*KV, error) {
-	opt = opt.WithReadOnly(true)
-	db, err := openDB(cc, opt)
-	if err != nil {
-		return nil, err
-	}
-	cfs, err := fs.NewFSWithClient(cc)
-	if err != nil {
-		return nil, err
-	}
-	return &KV{DB: db, name: name, cc: cc, fs: cfs, readOnly: true}, nil
+func OpenReadOnly(cc *client.Client, name string) (*KV, error) {
+	return openKV(cc, name, true)
 }
 
-// OpenWithDefaultsReadOnly opens a Charm Cloud managed Badger DB instance in
+// OpenWithDefaultsReadOnly opens a Charm Cloud managed key-value store in
 // read-only mode with default settings. This is useful when another process
 // holds the database lock and you only need to read data.
 func OpenWithDefaultsReadOnly(name string) (*KV, error) {
@@ -95,15 +95,7 @@ func OpenWithDefaultsReadOnly(name string) (*KV, error) {
 	if err != nil {
 		return nil, err
 	}
-	dd, err := cc.DataPath()
-	if err != nil {
-		return nil, err
-	}
-	pn := filepath.Join(dd, "/kv/", name)
-	opts := badger.DefaultOptions(pn).WithLoggingLevel(badger.ERROR)
-	opts.Logger = nil
-	opts = opts.WithValueLogFileSize(10000000)
-	return OpenReadOnly(cc, name, opts)
+	return OpenReadOnly(cc, name)
 }
 
 // IsReadOnly returns true if this KV instance was opened in read-only mode.
@@ -111,21 +103,21 @@ func (kv *KV) IsReadOnly() bool {
 	return kv.readOnly
 }
 
-// OpenWithFallback opens a Charm Cloud managed Badger DB instance, automatically
+// OpenWithFallback opens a Charm Cloud managed key-value store, automatically
 // falling back to read-only mode if another process holds the lock.
 // Use IsReadOnly() to check which mode was used.
-func OpenWithFallback(cc *client.Client, name string, opt badger.Options) (*KV, error) {
-	kv, err := Open(cc, name, opt)
+func OpenWithFallback(cc *client.Client, name string) (*KV, error) {
+	kv, err := Open(cc, name)
 	if err == nil {
 		return kv, nil
 	}
 	if IsLocked(err) {
-		return OpenReadOnly(cc, name, opt)
+		return OpenReadOnly(cc, name)
 	}
 	return nil, err
 }
 
-// OpenWithDefaultsFallback opens a Charm Cloud managed Badger DB instance with
+// OpenWithDefaultsFallback opens a Charm Cloud managed key-value store with
 // default settings, automatically falling back to read-only mode if another
 // process holds the lock. Use IsReadOnly() to check which mode was used.
 func OpenWithDefaultsFallback(name string) (*KV, error) {
@@ -139,122 +131,61 @@ func OpenWithDefaultsFallback(name string) (*KV, error) {
 	return nil, err
 }
 
-// OptionsWithEncryption returns badger.Options with all required encryption
-// settings enabled for a given encryption key.
-func OptionsWithEncryption(opt badger.Options, encKey []byte, cacheSize int64) (badger.Options, error) {
-	if cacheSize <= 0 {
-		return opt, fmt.Errorf("you must set an index cache size to use encrypted workloads in Badger v3")
-	}
-	return opt.WithEncryptionKey(encKey).WithIndexCacheSize(cacheSize), nil
-}
-
-// NewTransaction creates a new *badger.Txn with a Charm Cloud managed
-// timestamp. Returns ErrReadOnlyMode if update is true and the database
-// is open in read-only mode.
-func (kv *KV) NewTransaction(update bool) (*badger.Txn, error) {
-	if update && kv.readOnly {
-		return nil, &ErrReadOnlyMode{Operation: "create update transaction"}
-	}
-	var ts uint64
-	var err error
-	if update {
-		ts, err = kv.getSeq(kv.name)
-		if err != nil {
-			return nil, err
-		}
-	} else {
-		ts = math.MaxUint64
-	}
-	return kv.DB.NewTransactionAt(ts, update), nil
-}
-
-// NewStream returns a new *badger.Stream from the underlying Badger DB.
-func (kv *KV) NewStream() *badger.Stream {
-	return kv.DB.NewStreamAt(math.MaxUint64)
-}
-
-// View wraps the View() method for the underlying Badger DB.
-func (kv *KV) View(fn func(txn *badger.Txn) error) error {
-	return kv.DB.View(fn)
-}
-
-// Sync synchronizes the local Badger DB with any updates from the Charm Cloud.
+// Sync synchronizes the local database with any updates from the Charm Cloud.
 func (kv *KV) Sync() error {
-	return kv.syncFrom(kv.DB.MaxVersion())
+	return kv.syncFrom(kv.maxVersion())
 }
 
-// Commit commits a *badger.Txn and syncs the diff to the Charm Cloud.
-func (kv *KV) Commit(txn *badger.Txn, callback func(error)) error {
+// syncAfterWrite performs a cloud sync after a local write operation.
+func (kv *KV) syncAfterWrite() error {
 	// First sync any remote changes
-	mv := kv.DB.MaxVersion()
+	mv := kv.maxVersion()
 	err := kv.syncFrom(mv)
 	if err != nil {
 		return err
 	}
 
+	// Get next sequence number
 	seq, err := kv.nextSeq(kv.name)
 	if err != nil {
 		return err
 	}
 
-	// CommitAt is async - use a channel to wait for completion
-	// before backing up, ensuring the data is visible to Backup.
-	commitDone := make(chan error, 1)
-	err = txn.CommitAt(seq, func(commitErr error) {
-		commitDone <- commitErr
-	})
-	if err != nil {
+	// Update local max version
+	if err := kv.setMaxVersion(seq); err != nil {
 		return err
 	}
 
-	// Wait for commit to complete before backing up
-	if commitErr := <-commitDone; commitErr != nil {
-		if callback != nil {
-			callback(commitErr)
-		}
-		return commitErr
-	}
-
-	// Always do a full backup (from version 0) to work around managed mode
-	// visibility issues where Stream.Backup doesn't see recently committed entries.
-	// This is less efficient but ensures all data is backed up correctly.
-	// TODO: Investigate Badger managed mode backup visibility issue and potentially
-	// file an upstream bug report or find a more efficient solution.
-	backupErr := kv.backupSeq(0, seq)
-
-	// Call user callback after both commit and backup are complete
-	if callback != nil {
-		callback(backupErr)
-	}
-
-	return backupErr
+	// Always do a full backup
+	return kv.backupSeq(0, seq)
 }
 
-// Close closes the underlying Badger DB.
+// maxVersion returns the current max version from the meta table.
+func (kv *KV) maxVersion() uint64 {
+	val, _ := sqliteGetMeta(kv.db, "max_version")
+	return uint64(val)
+}
+
+// setMaxVersion updates the max version in the meta table.
+func (kv *KV) setMaxVersion(v uint64) error {
+	return sqliteSetMeta(kv.db, "max_version", int64(v))
+}
+
+// Close closes the underlying database.
 func (kv *KV) Close() error {
-	return kv.DB.Close()
+	return kv.db.Close()
 }
 
-// Set is a convenience method for setting a key and value. It creates and
-// commits a new transaction for the update.
+// Set is a convenience method for setting a key and value.
 // Returns ErrReadOnlyMode if the database is open in read-only mode.
 func (kv *KV) Set(key []byte, value []byte) error {
 	if kv.readOnly {
 		return &ErrReadOnlyMode{Operation: "set key"}
 	}
-	txn, err := kv.NewTransaction(true)
-	if err != nil {
+	if err := sqliteSet(kv.db, key, value); err != nil {
 		return err
 	}
-	err = txn.Set(key, value)
-	if err != nil {
-		return err
-	}
-	return kv.Commit(txn, func(err error) {
-		if err != nil {
-			log.Error("Badger commit error", "err", err)
-		}
-	})
+	return kv.syncAfterWrite()
 }
 
 // SetReader is a convenience method to set the value for a key to the data
@@ -269,19 +200,7 @@ func (kv *KV) SetReader(key []byte, value io.Reader) error {
 
 // Get is a convenience method for getting a value from the key value store.
 func (kv *KV) Get(key []byte) ([]byte, error) {
-	var v []byte
-	err := kv.View(func(txn *badger.Txn) error {
-		item, err := txn.Get(key)
-		if err != nil {
-			return err
-		}
-		v, err = item.ValueCopy(nil)
-		return err
-	})
-	if err != nil {
-		return v, err
-	}
-	return v, nil
+	return sqliteGet(kv.db, key)
 }
 
 // Delete is a convenience method for deleting a value from the key value store.
@@ -290,38 +209,15 @@ func (kv *KV) Delete(key []byte) error {
 	if kv.readOnly {
 		return &ErrReadOnlyMode{Operation: "delete key"}
 	}
-	txn, err := kv.NewTransaction(true)
-	if err != nil {
+	if err := sqliteDelete(kv.db, key); err != nil {
 		return err
 	}
-	err = txn.Delete(key)
-	if err != nil {
-		return err
-	}
-	return kv.Commit(txn, func(err error) {
-		if err != nil {
-			log.Error("Badger commit error", "err", err)
-		}
-	})
+	return kv.syncAfterWrite()
 }
 
 // Keys returns a list of all keys for this key value store.
 func (kv *KV) Keys() ([][]byte, error) {
-	var ks [][]byte
-	err := kv.View(func(txn *badger.Txn) error {
-		opts := badger.DefaultIteratorOptions
-		opts.PrefetchValues = false
-		it := txn.NewIterator(opts)
-		defer it.Close() //nolint:errcheck
-		for it.Rewind(); it.Valid(); it.Next() {
-			ks = append(ks, it.Item().KeyCopy(nil))
-		}
-		return nil
-	})
-	if err != nil {
-		return nil, err
-	}
-	return ks, nil
+	return sqliteKeys(kv.db)
 }
 
 // Client returns the underlying *client.Client.
@@ -329,28 +225,33 @@ func (kv *KV) Client() *client.Client {
 	return kv.cc
 }
 
-// Reset deletes the local copy of the Badger DB and rebuilds with a fresh sync
+// Reset deletes the local database and rebuilds with a fresh sync
 // from the Charm Cloud.
 func (kv *KV) Reset() error {
-	opts := kv.DB.Opts()
-	err := kv.DB.Close()
+	dbPath := kv.dbPath
+	err := kv.db.Close()
 	if err != nil {
 		return err
 	}
-	err = os.RemoveAll(opts.Dir)
+
+	// Remove database file and WAL files
+	if err := os.Remove(dbPath); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	walPath := dbPath + "-wal"
+	if err := os.Remove(walPath); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	shmPath := dbPath + "-shm"
+	if err := os.Remove(shmPath); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+
+	// Reopen database
+	db, err := openSQLite(dbPath)
 	if err != nil {
 		return err
 	}
-	if opts.ValueDir != opts.Dir {
-		err = os.RemoveAll(opts.ValueDir)
-		if err != nil {
-			return err
-		}
-	}
-	db, err := openDB(kv.cc, opts)
-	if err != nil {
-		return err
-	}
-	kv.DB = db
+	kv.db = db
 	return kv.Sync()
 }

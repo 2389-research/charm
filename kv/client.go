@@ -193,6 +193,10 @@ func openDB(cc *client.Client, opt badger.Options) (*badger.DB, error) {
 				break
 			}
 			if err != nil {
+				// Wrap lock errors with helpful message
+				if IsLocked(err) {
+					return nil, &ErrDatabaseLocked{Path: opt.Dir, Err: err}
+				}
 				return nil, err
 			}
 		}

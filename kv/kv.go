@@ -23,10 +23,11 @@ import (
 // user's encryption keys. Diffs are also encrypted locally before being synced
 // to the Charm Cloud.
 type KV struct {
-	DB   *badger.DB
-	name string
-	cc   *client.Client
-	fs   *fs.FS
+	DB       *badger.DB
+	name     string
+	cc       *client.Client
+	fs       *fs.FS
+	readOnly bool
 }
 
 // Open a Charm Cloud managed Badger DB instance with badger.Options and
@@ -69,6 +70,47 @@ func OpenWithDefaults(name string) (*KV, error) {
 	return Open(cc, name, opts)
 }
 
+// OpenReadOnly opens a Charm Cloud managed Badger DB instance in read-only mode.
+// This allows concurrent access when another process holds the write lock.
+// Write operations (Set, Delete, Commit) will return ErrReadOnlyMode.
+// Cloud sync is disabled in read-only mode.
+func OpenReadOnly(cc *client.Client, name string, opt badger.Options) (*KV, error) {
+	opt = opt.WithReadOnly(true)
+	db, err := openDB(cc, opt)
+	if err != nil {
+		return nil, err
+	}
+	cfs, err := fs.NewFSWithClient(cc)
+	if err != nil {
+		return nil, err
+	}
+	return &KV{DB: db, name: name, cc: cc, fs: cfs, readOnly: true}, nil
+}
+
+// OpenWithDefaultsReadOnly opens a Charm Cloud managed Badger DB instance in
+// read-only mode with default settings. This is useful when another process
+// holds the database lock and you only need to read data.
+func OpenWithDefaultsReadOnly(name string) (*KV, error) {
+	cc, err := client.NewClientWithDefaults()
+	if err != nil {
+		return nil, err
+	}
+	dd, err := cc.DataPath()
+	if err != nil {
+		return nil, err
+	}
+	pn := filepath.Join(dd, "/kv/", name)
+	opts := badger.DefaultOptions(pn).WithLoggingLevel(badger.ERROR)
+	opts.Logger = nil
+	opts = opts.WithValueLogFileSize(10000000)
+	return OpenReadOnly(cc, name, opts)
+}
+
+// IsReadOnly returns true if this KV instance was opened in read-only mode.
+func (kv *KV) IsReadOnly() bool {
+	return kv.readOnly
+}
+
 // OptionsWithEncryption returns badger.Options with all required encryption
 // settings enabled for a given encryption key.
 func OptionsWithEncryption(opt badger.Options, encKey []byte, cacheSize int64) (badger.Options, error) {
@@ -79,8 +121,12 @@ func OptionsWithEncryption(opt badger.Options, encKey []byte, cacheSize int64) (
 }
 
 // NewTransaction creates a new *badger.Txn with a Charm Cloud managed
-// timestamp.
+// timestamp. Returns ErrReadOnlyMode if update is true and the database
+// is open in read-only mode.
 func (kv *KV) NewTransaction(update bool) (*badger.Txn, error) {
+	if update && kv.readOnly {
+		return nil, &ErrReadOnlyMode{Operation: "create update transaction"}
+	}
 	var ts uint64
 	var err error
 	if update {
@@ -163,7 +209,11 @@ func (kv *KV) Close() error {
 
 // Set is a convenience method for setting a key and value. It creates and
 // commits a new transaction for the update.
+// Returns ErrReadOnlyMode if the database is open in read-only mode.
 func (kv *KV) Set(key []byte, value []byte) error {
+	if kv.readOnly {
+		return &ErrReadOnlyMode{Operation: "set key"}
+	}
 	txn, err := kv.NewTransaction(true)
 	if err != nil {
 		return err
@@ -207,7 +257,11 @@ func (kv *KV) Get(key []byte) ([]byte, error) {
 }
 
 // Delete is a convenience method for deleting a value from the key value store.
+// Returns ErrReadOnlyMode if the database is open in read-only mode.
 func (kv *KV) Delete(key []byte) error {
+	if kv.readOnly {
+		return &ErrReadOnlyMode{Operation: "delete key"}
+	}
 	txn, err := kv.NewTransaction(true)
 	if err != nil {
 		return err

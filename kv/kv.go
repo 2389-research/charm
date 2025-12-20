@@ -3,12 +3,16 @@ package kv
 
 import (
 	"database/sql"
+	"encoding/hex"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 
 	"github.com/charmbracelet/charm/client"
 	"github.com/charmbracelet/charm/fs"
+	charm "github.com/charmbracelet/charm/proto"
+	"github.com/jacobsa/crypto/siv"
 )
 
 // KV provides a Charm Cloud backed key-value store.
@@ -26,12 +30,39 @@ type KV struct {
 	readOnly bool
 }
 
-// openKV opens a KV store with the given client, name, and read-only mode.
-func openKV(cc *client.Client, name string, readOnly bool) (*KV, error) {
+// Config holds optional configuration for opening a KV store.
+type Config struct {
+	customPath string
+}
+
+// Option is a functional option for configuring KV store opening.
+type Option func(*Config)
+
+// WithPath sets a custom database path instead of using client.DataPath().
+func WithPath(path string) Option {
+	return func(c *Config) {
+		c.customPath = path
+	}
+}
+
+// openKV opens a KV store with the given client, name, read-only mode, and options.
+func openKV(cc *client.Client, name string, readOnly bool, opts ...Option) (*KV, error) {
+	// Apply options
+	cfg := &Config{}
+	for _, opt := range opts {
+		opt(cfg)
+	}
+
 	// Get data path
-	dd, err := cc.DataPath()
-	if err != nil {
-		return nil, err
+	var dd string
+	var err error
+	if cfg.customPath != "" {
+		dd = cfg.customPath
+	} else {
+		dd, err = cc.DataPath()
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	// Build database path
@@ -65,37 +96,37 @@ func openKV(cc *client.Client, name string, readOnly bool) (*KV, error) {
 }
 
 // Open a Charm Cloud managed key-value store.
-func Open(cc *client.Client, name string) (*KV, error) {
-	return openKV(cc, name, false)
+func Open(cc *client.Client, name string, opts ...Option) (*KV, error) {
+	return openKV(cc, name, false, opts...)
 }
 
 // OpenWithDefaults opens a Charm Cloud managed key-value store with the
 // default settings pulled from environment variables.
-func OpenWithDefaults(name string) (*KV, error) {
+func OpenWithDefaults(name string, opts ...Option) (*KV, error) {
 	cc, err := client.NewClientWithDefaults()
 	if err != nil {
 		return nil, err
 	}
-	return Open(cc, name)
+	return Open(cc, name, opts...)
 }
 
 // OpenReadOnly opens a Charm Cloud managed key-value store in read-only mode.
 // This allows concurrent access when another process holds the write lock.
 // Write operations (Set, Delete) will return ErrReadOnlyMode.
 // Cloud sync is disabled in read-only mode.
-func OpenReadOnly(cc *client.Client, name string) (*KV, error) {
-	return openKV(cc, name, true)
+func OpenReadOnly(cc *client.Client, name string, opts ...Option) (*KV, error) {
+	return openKV(cc, name, true, opts...)
 }
 
 // OpenWithDefaultsReadOnly opens a Charm Cloud managed key-value store in
 // read-only mode with default settings. This is useful when another process
 // holds the database lock and you only need to read data.
-func OpenWithDefaultsReadOnly(name string) (*KV, error) {
+func OpenWithDefaultsReadOnly(name string, opts ...Option) (*KV, error) {
 	cc, err := client.NewClientWithDefaults()
 	if err != nil {
 		return nil, err
 	}
-	return OpenReadOnly(cc, name)
+	return OpenReadOnly(cc, name, opts...)
 }
 
 // IsReadOnly returns true if this KV instance was opened in read-only mode.
@@ -106,13 +137,13 @@ func (kv *KV) IsReadOnly() bool {
 // OpenWithFallback opens a Charm Cloud managed key-value store, automatically
 // falling back to read-only mode if another process holds the lock.
 // Use IsReadOnly() to check which mode was used.
-func OpenWithFallback(cc *client.Client, name string) (*KV, error) {
-	kv, err := Open(cc, name)
+func OpenWithFallback(cc *client.Client, name string, opts ...Option) (*KV, error) {
+	kv, err := Open(cc, name, opts...)
 	if err == nil {
 		return kv, nil
 	}
 	if IsLocked(err) {
-		return OpenReadOnly(cc, name)
+		return OpenReadOnly(cc, name, opts...)
 	}
 	return nil, err
 }
@@ -120,13 +151,13 @@ func OpenWithFallback(cc *client.Client, name string) (*KV, error) {
 // OpenWithDefaultsFallback opens a Charm Cloud managed key-value store with
 // default settings, automatically falling back to read-only mode if another
 // process holds the lock. Use IsReadOnly() to check which mode was used.
-func OpenWithDefaultsFallback(name string) (*KV, error) {
-	kv, err := OpenWithDefaults(name)
+func OpenWithDefaultsFallback(name string, opts ...Option) (*KV, error) {
+	kv, err := OpenWithDefaults(name, opts...)
 	if err == nil {
 		return kv, nil
 	}
 	if IsLocked(err) {
-		return OpenWithDefaultsReadOnly(name)
+		return OpenWithDefaultsReadOnly(name, opts...)
 	}
 	return nil, err
 }
@@ -176,13 +207,85 @@ func (kv *KV) Close() error {
 	return kv.db.Close()
 }
 
+// encryptValue encrypts a value using the client's encryption keys.
+// Uses deterministic SIV encryption to ensure the same value always encrypts
+// to the same ciphertext, matching BadgerDB's security model.
+func (kv *KV) encryptValue(value []byte) ([]byte, error) {
+	// Get encryption keys from client
+	eks, err := kv.cc.EncryptKeys()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get encryption keys: %w", err)
+	}
+	if len(eks) == 0 {
+		return nil, fmt.Errorf("no encryption keys available")
+	}
+
+	// Use first key for encryption (same as crypt package)
+	var key *charm.EncryptKey
+	key = eks[0]
+	if len(key.Key) < 32 {
+		return nil, fmt.Errorf("encryption key too short: %d bytes, need 32", len(key.Key))
+	}
+
+	// Encrypt using SIV (deterministic encryption)
+	ct, err := siv.Encrypt(nil, []byte(key.Key[:32]), value, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to encrypt value: %w", err)
+	}
+
+	// Return hex-encoded ciphertext
+	return []byte(hex.EncodeToString(ct)), nil
+}
+
+// decryptValue decrypts a value using the client's encryption keys.
+// Tries all available keys to handle key rotation.
+func (kv *KV) decryptValue(encValue []byte) ([]byte, error) {
+	// Get encryption keys from client
+	eks, err := kv.cc.EncryptKeys()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get encryption keys: %w", err)
+	}
+	if len(eks) == 0 {
+		return nil, fmt.Errorf("no encryption keys available")
+	}
+
+	// Decode hex-encoded ciphertext
+	ct, err := hex.DecodeString(string(encValue))
+	if err != nil {
+		return nil, fmt.Errorf("failed to decode encrypted value: %w", err)
+	}
+
+	// Try all keys (for key rotation support)
+	var pt []byte
+	for _, k := range eks {
+		if len(k.Key) < 32 {
+			continue
+		}
+		pt, err = siv.Decrypt([]byte(k.Key[:32]), ct, nil)
+		if err == nil {
+			break
+		}
+	}
+
+	if len(pt) == 0 {
+		return nil, fmt.Errorf("failed to decrypt value with any available key")
+	}
+
+	return pt, nil
+}
+
 // Set is a convenience method for setting a key and value.
 // Returns ErrReadOnlyMode if the database is open in read-only mode.
 func (kv *KV) Set(key []byte, value []byte) error {
 	if kv.readOnly {
 		return &ErrReadOnlyMode{Operation: "set key"}
 	}
-	if err := sqliteSet(kv.db, key, value); err != nil {
+	// Encrypt the value before storing
+	encValue, err := kv.encryptValue(value)
+	if err != nil {
+		return err
+	}
+	if err := sqliteSet(kv.db, key, encValue); err != nil {
 		return err
 	}
 	return kv.syncAfterWrite()
@@ -200,7 +303,12 @@ func (kv *KV) SetReader(key []byte, value io.Reader) error {
 
 // Get is a convenience method for getting a value from the key value store.
 func (kv *KV) Get(key []byte) ([]byte, error) {
-	return sqliteGet(kv.db, key)
+	encValue, err := sqliteGet(kv.db, key)
+	if err != nil {
+		return nil, err
+	}
+	// Decrypt the value before returning
+	return kv.decryptValue(encValue)
 }
 
 // Delete is a convenience method for deleting a value from the key value store.

@@ -1179,13 +1179,8 @@ func TestE2E_KV_OverwriteSyncsToCloud(t *testing.T) {
 // openKVAtPath opens a KV database at a specific local path for testing.
 // This allows simulating multiple machines with separate local storage
 // but syncing to the same cloud database.
-// Note: localPath is currently ignored as KV uses client.DataPath() internally.
-// To test multiple machines, you'll need to use different client instances
-// with different data paths.
 func openKVAtPath(cl *client.Client, name, localPath string) (*kv.KV, error) {
-	// TODO: Update KV API to support custom paths for testing
-	_ = localPath // Suppress unused variable warning
-	return kv.Open(cl, name)
+	return kv.Open(cl, name, kv.WithPath(localPath))
 }
 
 func TestE2E_KV_MultipleOverwriteSync(t *testing.T) {

@@ -117,12 +117,12 @@ func (kv *KV) restoreSeq(seq uint64) error {
 }
 
 func (kv *KV) nextSeq(name string) (uint64, error) {
-	var sm *charm.SeqMsg
-	name, err := kv.fs.EncryptPath(name)
+	var sm charm.SeqMsg
+	encName, err := kv.fs.EncryptPath(name)
 	if err != nil {
 		return 0, err
 	}
-	err = kv.cc.AuthedJSONRequest("POST", fmt.Sprintf("/v1/seq/%s", name), nil, &sm)
+	err = kv.cc.AuthedJSONRequest("POST", fmt.Sprintf("/v1/seq/%s", encName), nil, &sm)
 	if err != nil {
 		return 0, err
 	}
@@ -154,12 +154,26 @@ func (kv *KV) syncFrom(mv uint64) error {
 		return seqs[i] < seqs[j]
 	})
 
+	// Track highest sequence restored
+	var maxSeq uint64
+
 	// Restore in sequence order
 	for _, seq := range seqs {
 		err = kv.restoreSeq(seq)
 		if err != nil {
 			return err
 		}
+		if seq > maxSeq {
+			maxSeq = seq
+		}
 	}
+
+	// Update max_version to reflect the highest sequence we restored
+	if maxSeq > 0 {
+		if err := kv.setMaxVersion(maxSeq); err != nil {
+			return err
+		}
+	}
+
 	return nil
 }

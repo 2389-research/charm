@@ -92,11 +92,9 @@ const (
 	sqlInsertNews    = `INSERT INTO news (subject, body) VALUES (?,?)`
 	sqlInsertNewsTag = `INSERT INTO news_tag (news_id, tag) VALUES (?,?)`
 
-	sqlIncNamedSeq = `INSERT INTO named_seq (user_id, name)
-                    VALUES(?,?)
+	sqlIncNamedSeq = `INSERT INTO named_seq (user_id, name, seq)
+                    VALUES(?,?,1)
                     ON CONFLICT (user_id, name) DO UPDATE SET
-                    user_id = excluded.user_id,
-                    name = excluded.name,
                     seq = seq + 1`
 
 	sqlInsertEncryptKey         = `INSERT INTO encrypt_key (encrypted_key, global_id, public_key_id) VALUES (?, ?, ?)`

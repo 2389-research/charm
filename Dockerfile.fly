@@ -6,6 +6,9 @@ FROM golang:1.23-alpine AS builder
 
 RUN apk add --no-cache git
 
+# Allow Go to download newer toolchain if required by dependencies
+ENV GOTOOLCHAIN=auto
+
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download

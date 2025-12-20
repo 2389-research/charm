@@ -463,9 +463,6 @@ func TestE2E_FS_SpecialCharactersInPath(t *testing.T) {
 // =============================================================================
 
 func TestE2E_KV_BasicOperations(t *testing.T) {
-	if raceEnabled {
-		t.Skip("skipping KV test with race detector: BadgerDB has known internal races")
-	}
 	cl := setupClient(t)
 	mustAuth(t, cl)
 
@@ -494,9 +491,6 @@ func TestE2E_KV_BasicOperations(t *testing.T) {
 }
 
 func TestE2E_KV_Overwrite(t *testing.T) {
-	if raceEnabled {
-		t.Skip("skipping KV test with race detector: BadgerDB has known internal races")
-	}
 	cl := setupClient(t)
 	mustAuth(t, cl)
 
@@ -532,9 +526,6 @@ func TestE2E_KV_Overwrite(t *testing.T) {
 }
 
 func TestE2E_KV_Delete(t *testing.T) {
-	if raceEnabled {
-		t.Skip("skipping KV test with race detector: BadgerDB has known internal races")
-	}
 	cl := setupClient(t)
 	mustAuth(t, cl)
 
@@ -566,9 +557,6 @@ func TestE2E_KV_Delete(t *testing.T) {
 }
 
 func TestE2E_KV_Keys(t *testing.T) {
-	if raceEnabled {
-		t.Skip("skipping KV test with race detector: BadgerDB has known internal races")
-	}
 	cl := setupClient(t)
 	mustAuth(t, cl)
 
@@ -611,9 +599,6 @@ func TestE2E_KV_Keys(t *testing.T) {
 }
 
 func TestE2E_KV_BinaryData(t *testing.T) {
-	if raceEnabled {
-		t.Skip("skipping KV test with race detector: BadgerDB has known internal races")
-	}
 	cl := setupClient(t)
 	mustAuth(t, cl)
 
@@ -643,9 +628,6 @@ func TestE2E_KV_BinaryData(t *testing.T) {
 }
 
 func TestE2E_KV_LargeValue(t *testing.T) {
-	if raceEnabled {
-		t.Skip("skipping KV test with race detector: BadgerDB has known internal races")
-	}
 	cl := setupClient(t)
 	mustAuth(t, cl)
 
@@ -928,9 +910,6 @@ func TestE2E_Workflow_AuthThenFS(t *testing.T) {
 }
 
 func TestE2E_Workflow_AuthThenKV(t *testing.T) {
-	if raceEnabled {
-		t.Skip("skipping KV test with race detector: BadgerDB has known internal races")
-	}
 	// Complete workflow: auth -> KV operations
 	cl := setupClient(t)
 
@@ -968,9 +947,6 @@ func TestE2E_Workflow_AuthThenKV(t *testing.T) {
 }
 
 func TestE2E_Workflow_FullUserJourney(t *testing.T) {
-	if raceEnabled {
-		t.Skip("skipping KV test with race detector: BadgerDB has known internal races")
-	}
 	// Complete user journey: auth -> set name -> encrypt keys -> FS -> KV
 	cl := setupClient(t)
 
@@ -1044,9 +1020,6 @@ func TestE2E_KV_OverwriteSyncsToCloud(t *testing.T) {
 	// 2. Machine B: Sync from cloud, verify value1
 	// 3. Machine A: Overwrite key=value2, sync to cloud
 	// 4. Machine B: Sync from cloud, should see value2 (BUG: sees value1)
-	if raceEnabled {
-		t.Skip("skipping KV test with race detector: BadgerDB has known internal races")
-	}
 
 	cl := setupClient(t)
 	mustAuth(t, cl)
@@ -1185,9 +1158,6 @@ func openKVAtPath(cl *client.Client, name, localPath string) (*kv.KV, error) {
 
 func TestE2E_KV_MultipleOverwriteSync(t *testing.T) {
 	// Test multiple consecutive overwrites to see if any are lost
-	if raceEnabled {
-		t.Skip("skipping KV test with race detector: BadgerDB has known internal races")
-	}
 
 	cl := setupClient(t)
 	mustAuth(t, cl)

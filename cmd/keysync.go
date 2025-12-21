@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"fmt"
+	"os"
 
 	"github.com/spf13/cobra"
 )
@@ -16,6 +17,10 @@ var KeySyncCmd = &cobra.Command{
 	Args:   cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		cc := initCharmClient()
-		return cc.SyncEncryptKeys()
+		if err := cc.SyncEncryptKeys(); err != nil {
+			return err
+		}
+		fmt.Fprintln(os.Stderr, "Synced encryption keys")
+		return nil
 	},
 }

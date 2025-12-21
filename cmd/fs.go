@@ -247,11 +247,40 @@ func fsCat(_ *cobra.Command, args []string) error {
 	return err
 }
 
-func fsMove(cmd *cobra.Command, args []string) error {
-	if err := fsCopy(cmd, args); err != nil {
+func fsMove(_ *cobra.Command, args []string) error {
+	lrfs, err := newLocalRemoteFS()
+	if err != nil {
 		return err
 	}
-	return fsRemove(cmd, args[:1])
+
+	src := args[0]
+	dst := args[1]
+
+	// Handle destination shorthand
+	if !strings.HasPrefix(src, "charm:") {
+		srcInfo, err := os.Stat(src)
+		if err != nil {
+			return err
+		}
+		if !srcInfo.IsDir() && (dst == "charm:" || dst == "charm:/") {
+			dst = "charm:/" + filepath.Base(src)
+		}
+	}
+
+	if err := lrfs.copy(src, dst, isRecursive); err != nil {
+		return err
+	}
+
+	lsfs, err := cfs.NewFS()
+	if err != nil {
+		return err
+	}
+	if err := lsfs.Remove(src); err != nil {
+		return err
+	}
+
+	fmt.Fprintf(os.Stderr, "Moved %s to %s\n", src, dst)
+	return nil
 }
 
 func fsRemove(_ *cobra.Command, args []string) error {
@@ -259,7 +288,11 @@ func fsRemove(_ *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	return lsfs.Remove(args[0])
+	if err := lsfs.Remove(args[0]); err != nil {
+		return err
+	}
+	fmt.Fprintf(os.Stderr, "Removed %s\n", args[0])
+	return nil
 }
 
 func fsCopy(_ *cobra.Command, args []string) error {
@@ -271,7 +304,11 @@ func fsCopy(_ *cobra.Command, args []string) error {
 	src := args[0]
 	dst := args[1]
 	if strings.HasPrefix(src, "charm:") {
-		return lrfs.copy(src, dst, isRecursive)
+		if err := lrfs.copy(src, dst, isRecursive); err != nil {
+			return err
+		}
+		fmt.Fprintf(os.Stderr, "Copied %s to %s\n", src, dst)
+		return nil
 	}
 
 	// `charm fs cp foo charm:` will copy foo to charm:/foo
@@ -284,7 +321,11 @@ func fsCopy(_ *cobra.Command, args []string) error {
 		dst = "charm:/" + filepath.Base(src)
 	}
 
-	return lrfs.copy(src, dst, isRecursive)
+	if err := lrfs.copy(src, dst, isRecursive); err != nil {
+		return err
+	}
+	fmt.Fprintf(os.Stderr, "Copied %s to %s\n", src, dst)
+	return nil
 }
 
 func fsList(_ *cobra.Command, args []string) error {

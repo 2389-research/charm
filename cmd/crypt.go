@@ -21,7 +21,7 @@ var (
 		Long:   styles.Paragraph.Render("Commands to encrypt and decrypt data with your Charm Cloud encryption keys."),
 		Args:   cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return nil
+			return cmd.Help()
 		},
 	}
 

@@ -26,7 +26,7 @@ var (
 		Long:   paragraph("Commands to set, get and delete data from your Charm Cloud backed key value store."),
 		Args:   cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return nil
+			return cmd.Help()
 		},
 	}
 
@@ -89,9 +89,16 @@ func kvSet(_ *cobra.Command, args []string) error {
 		return err
 	}
 	if len(args) == 2 {
-		return db.Set(k, []byte(args[1]))
+		if err := db.Set(k, []byte(args[1])); err != nil {
+			return err
+		}
+	} else {
+		if err := db.SetReader(k, os.Stdin); err != nil {
+			return err
+		}
 	}
-	return db.SetReader(k, os.Stdin)
+	fmt.Fprintf(os.Stderr, "Set %s\n", string(k))
+	return nil
 }
 
 func kvGet(_ *cobra.Command, args []string) error {
@@ -120,7 +127,11 @@ func kvDelete(_ *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	return db.Delete(k)
+	if err := db.Delete(k); err != nil {
+		return err
+	}
+	fmt.Fprintf(os.Stderr, "Deleted %s\n", string(k))
+	return nil
 }
 
 func kvList(_ *cobra.Command, args []string) error {
@@ -199,7 +210,15 @@ func kvSync(_ *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	return db.Sync()
+	if err := db.Sync(); err != nil {
+		return err
+	}
+	dbName := n
+	if dbName == "" {
+		dbName = "default"
+	}
+	fmt.Fprintf(os.Stderr, "Synced %s\n", dbName)
+	return nil
 }
 
 func kvReset(_ *cobra.Command, args []string) error {
@@ -211,7 +230,15 @@ func kvReset(_ *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	return db.Reset()
+	if err := db.Reset(); err != nil {
+		return err
+	}
+	dbName := n
+	if dbName == "" {
+		dbName = "default"
+	}
+	fmt.Fprintf(os.Stderr, "Reset %s\n", dbName)
+	return nil
 }
 
 func nameFromArgs(args []string) (string, error) {

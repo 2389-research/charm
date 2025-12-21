@@ -14,11 +14,48 @@ import (
 	_ "modernc.org/sqlite"
 )
 
+// isCorruptDatabaseError checks if an error indicates the database file is corrupt
+// or not a valid SQLite database. This can happen when old BadgerDB backup data
+// gets synced to the database path.
+func isCorruptDatabaseError(err error) bool {
+	if err == nil {
+		return false
+	}
+	errStr := err.Error()
+	// SQLite error code 26 is SQLITE_NOTADB
+	return strings.Contains(errStr, "not a database") ||
+		strings.Contains(errStr, "(26)") ||
+		strings.Contains(errStr, "file is encrypted or is not a database")
+}
+
+// recoverCorruptDatabase removes a corrupt database file and its WAL/SHM files.
+// This is called when we detect a corrupt database (e.g., from old BadgerDB backups)
+// to allow creating a fresh database on retry.
+func recoverCorruptDatabase(path string) error {
+	// Remove the main database file
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("failed to remove corrupt database: %w", err)
+	}
+	// Remove WAL file if it exists
+	_ = os.Remove(path + "-wal")
+	// Remove SHM file if it exists
+	_ = os.Remove(path + "-shm")
+	return nil
+}
+
 // openSQLite opens or creates a SQLite database with the KV schema.
 // Uses WAL mode for better concurrency (multiple readers, one writer).
+// If the database file is corrupt (e.g., from old BadgerDB backups), it will
+// delete the corrupt file and create a fresh database.
 //
 //nolint:unused // Used in sqlite_test.go and will be used in kv.go integration
 func openSQLite(path string) (*sql.DB, error) {
+	return openSQLiteWithRecovery(path, true)
+}
+
+// openSQLiteWithRecovery opens a SQLite database with optional corruption recovery.
+// If allowRecovery is true and the file is corrupt, it deletes the file and retries.
+func openSQLiteWithRecovery(path string, allowRecovery bool) (*sql.DB, error) {
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open sqlite: %w", err)
@@ -28,6 +65,12 @@ func openSQLite(path string) (*sql.DB, error) {
 	// This makes SQLite wait up to 5 seconds for locks instead of failing immediately.
 	if _, err := db.Exec("PRAGMA busy_timeout=5000"); err != nil {
 		_ = db.Close()
+		// Check for corruption and recover if allowed
+		if allowRecovery && isCorruptDatabaseError(err) {
+			if recoverErr := recoverCorruptDatabase(path); recoverErr == nil {
+				return openSQLiteWithRecovery(path, false) // Don't allow nested recovery
+			}
+		}
 		return nil, fmt.Errorf("failed to set busy timeout: %w", err)
 	}
 
@@ -37,6 +80,12 @@ func openSQLite(path string) (*sql.DB, error) {
 	var journalMode string
 	if err := db.QueryRow("PRAGMA journal_mode").Scan(&journalMode); err != nil {
 		_ = db.Close()
+		// Check for corruption and recover if allowed
+		if allowRecovery && isCorruptDatabaseError(err) {
+			if recoverErr := recoverCorruptDatabase(path); recoverErr == nil {
+				return openSQLiteWithRecovery(path, false) // Don't allow nested recovery
+			}
+		}
 		return nil, fmt.Errorf("failed to query journal mode: %w", err)
 	}
 	if journalMode != "wal" {

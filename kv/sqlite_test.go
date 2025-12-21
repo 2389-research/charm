@@ -5,6 +5,7 @@ package kv
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
@@ -584,5 +585,58 @@ func TestSQLiteMultipleConnectionsWriting(t *testing.T) {
 	}
 	if len(keys) != numConnections*writesPerConnection {
 		t.Errorf("expected %d keys, got %d", numConnections*writesPerConnection, len(keys))
+	}
+}
+
+func TestSQLiteCorruptDatabaseRecovery(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "corrupt.db")
+
+	// Create a corrupt database file (simulating old BadgerDB backup data)
+	corruptData := []byte(`item:2ca7a9c6-1b20-456c-8aee-74347d695014{"ID":"test"}`)
+	if err := os.WriteFile(dbPath, corruptData, 0600); err != nil {
+		t.Fatalf("failed to create corrupt file: %v", err)
+	}
+
+	// openSQLite should detect corruption and recover
+	db, err := openSQLite(dbPath)
+	if err != nil {
+		t.Fatalf("openSQLite should recover from corruption but got error: %v", err)
+	}
+	defer db.Close()
+
+	// Verify we have a working database
+	if err := sqliteSet(db, []byte("test-key"), []byte("test-value")); err != nil {
+		t.Fatalf("failed to write to recovered database: %v", err)
+	}
+
+	got, err := sqliteGet(db, []byte("test-key"))
+	if err != nil {
+		t.Fatalf("failed to read from recovered database: %v", err)
+	}
+	if string(got) != "test-value" {
+		t.Errorf("got %q, want %q", got, "test-value")
+	}
+}
+
+func TestIsCorruptDatabaseError(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"nil error", nil, false},
+		{"not a database", fmt.Errorf("file is not a database"), true},
+		{"error code 26", fmt.Errorf("SQLite error (26)"), true},
+		{"encrypted message", fmt.Errorf("file is encrypted or is not a database"), true},
+		{"other error", fmt.Errorf("some other error"), false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isCorruptDatabaseError(tt.err); got != tt.want {
+				t.Errorf("isCorruptDatabaseError() = %v, want %v", got, tt.want)
+			}
+		})
 	}
 }

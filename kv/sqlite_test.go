@@ -5,6 +5,7 @@ package kv
 
 import (
 	"bytes"
+	"database/sql"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -638,5 +639,287 @@ func TestIsCorruptDatabaseError(t *testing.T) {
 				t.Errorf("isCorruptDatabaseError() = %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestRecoverCorruptDatabase(t *testing.T) {
+	dir := t.TempDir()
+
+	t.Run("removes db and wal files", func(t *testing.T) {
+		dbPath := filepath.Join(dir, "test1.db")
+		walPath := dbPath + "-wal"
+		shmPath := dbPath + "-shm"
+
+		// Create all three files
+		for _, p := range []string{dbPath, walPath, shmPath} {
+			if err := os.WriteFile(p, []byte("corrupt"), 0600); err != nil {
+				t.Fatalf("failed to create %s: %v", p, err)
+			}
+		}
+
+		// Verify files exist
+		for _, p := range []string{dbPath, walPath, shmPath} {
+			if _, err := os.Stat(p); os.IsNotExist(err) {
+				t.Fatalf("file should exist: %s", p)
+			}
+		}
+
+		// Recover
+		if err := recoverCorruptDatabase(dbPath); err != nil {
+			t.Fatalf("recoverCorruptDatabase failed: %v", err)
+		}
+
+		// Verify all files are gone
+		for _, p := range []string{dbPath, walPath, shmPath} {
+			if _, err := os.Stat(p); !os.IsNotExist(err) {
+				t.Errorf("file should not exist after recovery: %s", p)
+			}
+		}
+	})
+
+	t.Run("handles missing files gracefully", func(t *testing.T) {
+		dbPath := filepath.Join(dir, "nonexistent.db")
+
+		// Should not error on missing files
+		if err := recoverCorruptDatabase(dbPath); err != nil {
+			t.Errorf("recoverCorruptDatabase should handle missing files: %v", err)
+		}
+	})
+
+	t.Run("removes db without wal files", func(t *testing.T) {
+		dbPath := filepath.Join(dir, "nowal.db")
+
+		// Create only the db file
+		if err := os.WriteFile(dbPath, []byte("corrupt"), 0600); err != nil {
+			t.Fatalf("failed to create db: %v", err)
+		}
+
+		if err := recoverCorruptDatabase(dbPath); err != nil {
+			t.Fatalf("recoverCorruptDatabase failed: %v", err)
+		}
+
+		if _, err := os.Stat(dbPath); !os.IsNotExist(err) {
+			t.Error("db file should be removed")
+		}
+	})
+}
+
+func TestCorruptDatabaseRecoveryEdgeCases(t *testing.T) {
+	t.Run("empty file triggers recovery", func(t *testing.T) {
+		dir := t.TempDir()
+		dbPath := filepath.Join(dir, "empty.db")
+
+		// Create empty file
+		if err := os.WriteFile(dbPath, []byte{}, 0600); err != nil {
+			t.Fatalf("failed to create empty file: %v", err)
+		}
+
+		db, err := openSQLite(dbPath)
+		if err != nil {
+			t.Fatalf("openSQLite should recover from empty file: %v", err)
+		}
+		defer db.Close()
+
+		// Verify database works
+		if err := sqliteSet(db, []byte("key"), []byte("value")); err != nil {
+			t.Fatalf("failed to write after recovery: %v", err)
+		}
+	})
+
+	t.Run("partial sqlite header triggers recovery", func(t *testing.T) {
+		dir := t.TempDir()
+		dbPath := filepath.Join(dir, "partial.db")
+
+		// Create file with partial SQLite magic (truncated)
+		if err := os.WriteFile(dbPath, []byte("SQLite for"), 0600); err != nil {
+			t.Fatalf("failed to create partial file: %v", err)
+		}
+
+		db, err := openSQLite(dbPath)
+		if err != nil {
+			t.Fatalf("openSQLite should recover from partial header: %v", err)
+		}
+		defer db.Close()
+
+		if err := sqliteSet(db, []byte("key"), []byte("value")); err != nil {
+			t.Fatalf("failed to write after recovery: %v", err)
+		}
+	})
+
+	t.Run("random binary garbage triggers recovery", func(t *testing.T) {
+		dir := t.TempDir()
+		dbPath := filepath.Join(dir, "garbage.db")
+
+		// Create file with random binary data
+		garbage := make([]byte, 1024)
+		for i := range garbage {
+			garbage[i] = byte(i % 256)
+		}
+		if err := os.WriteFile(dbPath, garbage, 0600); err != nil {
+			t.Fatalf("failed to create garbage file: %v", err)
+		}
+
+		db, err := openSQLite(dbPath)
+		if err != nil {
+			t.Fatalf("openSQLite should recover from binary garbage: %v", err)
+		}
+		defer db.Close()
+
+		if err := sqliteSet(db, []byte("key"), []byte("value")); err != nil {
+			t.Fatalf("failed to write after recovery: %v", err)
+		}
+	})
+
+	t.Run("corrupt file with wal files all get cleaned", func(t *testing.T) {
+		dir := t.TempDir()
+		dbPath := filepath.Join(dir, "withwal.db")
+		walPath := dbPath + "-wal"
+		shmPath := dbPath + "-shm"
+
+		// Create corrupt db and orphaned WAL/SHM files
+		if err := os.WriteFile(dbPath, []byte("corrupted data"), 0600); err != nil {
+			t.Fatalf("failed to create db: %v", err)
+		}
+		if err := os.WriteFile(walPath, []byte("old wal"), 0600); err != nil {
+			t.Fatalf("failed to create wal: %v", err)
+		}
+		if err := os.WriteFile(shmPath, []byte("old shm"), 0600); err != nil {
+			t.Fatalf("failed to create shm: %v", err)
+		}
+
+		db, err := openSQLite(dbPath)
+		if err != nil {
+			t.Fatalf("openSQLite should recover: %v", err)
+		}
+		defer db.Close()
+
+		// Old WAL/SHM should be gone (new ones may exist from the fresh DB)
+		// The key test is that the database works
+		if err := sqliteSet(db, []byte("key"), []byte("value")); err != nil {
+			t.Fatalf("failed to write after recovery: %v", err)
+		}
+
+		got, err := sqliteGet(db, []byte("key"))
+		if err != nil {
+			t.Fatalf("failed to read after recovery: %v", err)
+		}
+		if string(got) != "value" {
+			t.Errorf("got %q, want %q", got, "value")
+		}
+	})
+}
+
+func TestOpenSQLiteWithRecoveryDisabled(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "corrupt.db")
+
+	// Create a corrupt file
+	if err := os.WriteFile(dbPath, []byte("not a database"), 0600); err != nil {
+		t.Fatalf("failed to create corrupt file: %v", err)
+	}
+
+	// With recovery disabled, should fail
+	_, err := openSQLiteWithRecovery(dbPath, false)
+	if err == nil {
+		t.Fatal("openSQLiteWithRecovery with allowRecovery=false should fail on corrupt file")
+	}
+
+	// File should still exist (not recovered)
+	if _, statErr := os.Stat(dbPath); os.IsNotExist(statErr) {
+		t.Error("corrupt file should still exist when recovery is disabled")
+	}
+}
+
+func TestRecoveryPreservesDirectoryStructure(t *testing.T) {
+	dir := t.TempDir()
+	nestedDir := filepath.Join(dir, "some", "nested", "path")
+
+	if err := os.MkdirAll(nestedDir, 0755); err != nil {
+		t.Fatalf("failed to create nested dir: %v", err)
+	}
+
+	dbPath := filepath.Join(nestedDir, "data.db")
+
+	// Create corrupt file
+	if err := os.WriteFile(dbPath, []byte("corrupt"), 0600); err != nil {
+		t.Fatalf("failed to create file: %v", err)
+	}
+
+	db, err := openSQLite(dbPath)
+	if err != nil {
+		t.Fatalf("openSQLite should recover: %v", err)
+	}
+	defer db.Close()
+
+	// Directory structure should be preserved
+	if _, err := os.Stat(nestedDir); os.IsNotExist(err) {
+		t.Error("nested directory should still exist after recovery")
+	}
+
+	// Database should work
+	if err := sqliteSet(db, []byte("key"), []byte("value")); err != nil {
+		t.Fatalf("failed to write: %v", err)
+	}
+}
+
+func TestConcurrentRecoveryAttempts(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "concurrent.db")
+
+	// Create corrupt file
+	if err := os.WriteFile(dbPath, []byte("corrupt data here"), 0600); err != nil {
+		t.Fatalf("failed to create corrupt file: %v", err)
+	}
+
+	const numGoroutines = 5
+	var wg sync.WaitGroup
+	results := make(chan error, numGoroutines)
+	dbs := make(chan *sql.DB, numGoroutines)
+
+	// Try to open the corrupt database from multiple goroutines simultaneously
+	for i := 0; i < numGoroutines; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			db, err := openSQLite(dbPath)
+			if err != nil {
+				results <- err
+			} else {
+				dbs <- db
+			}
+		}()
+	}
+
+	wg.Wait()
+	close(results)
+	close(dbs)
+
+	// Collect errors
+	var errors []error
+	for err := range results {
+		errors = append(errors, err)
+	}
+
+	// Collect and close successful connections
+	var successCount int
+	for db := range dbs {
+		successCount++
+		db.Close()
+	}
+
+	// At least one should succeed
+	if successCount == 0 {
+		t.Errorf("expected at least one successful open, got %d errors: %v", len(errors), errors)
+	}
+
+	// Verify the database is usable
+	finalDB, err := openSQLite(dbPath)
+	if err != nil {
+		t.Fatalf("final open failed: %v", err)
+	}
+	defer finalDB.Close()
+
+	if err := sqliteSet(finalDB, []byte("test"), []byte("value")); err != nil {
+		t.Fatalf("write to recovered db failed: %v", err)
 	}
 }

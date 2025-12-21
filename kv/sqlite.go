@@ -24,10 +24,33 @@ func openSQLite(path string) (*sql.DB, error) {
 		return nil, fmt.Errorf("failed to open sqlite: %w", err)
 	}
 
-	// Enable WAL mode for better concurrency
-	if _, err := db.Exec("PRAGMA journal_mode=WAL"); err != nil {
+	// Set busy timeout first to handle concurrent access gracefully.
+	// This makes SQLite wait up to 5 seconds for locks instead of failing immediately.
+	if _, err := db.Exec("PRAGMA busy_timeout=5000"); err != nil {
 		_ = db.Close()
-		return nil, fmt.Errorf("failed to enable WAL mode: %w", err)
+		return nil, fmt.Errorf("failed to set busy timeout: %w", err)
+	}
+
+	// Check current journal mode - only enable WAL if not already set.
+	// This avoids lock contention when multiple processes open the same database,
+	// since PRAGMA journal_mode=WAL requires an exclusive lock to switch modes.
+	var journalMode string
+	if err := db.QueryRow("PRAGMA journal_mode").Scan(&journalMode); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("failed to query journal mode: %w", err)
+	}
+	if journalMode != "wal" {
+		if _, err := db.Exec("PRAGMA journal_mode=WAL"); err != nil {
+			// If WAL enable failed, check if another connection already set it.
+			// This handles the race where multiple connections open simultaneously.
+			var currentMode string
+			if queryErr := db.QueryRow("PRAGMA journal_mode").Scan(&currentMode); queryErr == nil && currentMode == "wal" {
+				// Another connection set WAL mode, we're good
+			} else {
+				_ = db.Close()
+				return nil, fmt.Errorf("failed to enable WAL mode: %w", err)
+			}
+		}
 	}
 
 	// Create schema

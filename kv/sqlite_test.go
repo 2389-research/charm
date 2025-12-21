@@ -1,11 +1,12 @@
 // ABOUTME: Tests for SQLite storage layer
-// ABOUTME: Covers schema creation, basic operations, and backup/restore
+// ABOUTME: Covers schema creation, basic operations, backup/restore, and WAL mode
 
 package kv
 
 import (
 	"bytes"
 	"path/filepath"
+	"sync"
 	"testing"
 )
 
@@ -321,5 +322,189 @@ func TestEscapeSQLiteString(t *testing.T) {
 				t.Errorf("escapeSQLiteString() = %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestSQLiteWALModeEnabled(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+
+	db, err := openSQLite(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open sqlite: %v", err)
+	}
+	defer db.Close()
+
+	// Verify WAL mode is enabled
+	var journalMode string
+	if err := db.QueryRow("PRAGMA journal_mode").Scan(&journalMode); err != nil {
+		t.Fatalf("failed to query journal mode: %v", err)
+	}
+	if journalMode != "wal" {
+		t.Errorf("journal_mode = %q, want %q", journalMode, "wal")
+	}
+}
+
+func TestSQLiteBusyTimeoutSet(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+
+	db, err := openSQLite(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open sqlite: %v", err)
+	}
+	defer db.Close()
+
+	// Verify busy timeout is set to 5000ms
+	var timeout int
+	if err := db.QueryRow("PRAGMA busy_timeout").Scan(&timeout); err != nil {
+		t.Fatalf("failed to query busy_timeout: %v", err)
+	}
+	if timeout != 5000 {
+		t.Errorf("busy_timeout = %d, want %d", timeout, 5000)
+	}
+}
+
+func TestSQLiteWALModePreservedOnReopen(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+
+	// Open and close to create the database with WAL mode
+	db1, err := openSQLite(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open sqlite first time: %v", err)
+	}
+	if err := sqliteSet(db1, []byte("key"), []byte("value")); err != nil {
+		t.Fatalf("failed to set key: %v", err)
+	}
+	db1.Close()
+
+	// Reopen the database - should not fail trying to re-enable WAL
+	db2, err := openSQLite(dbPath)
+	if err != nil {
+		t.Fatalf("failed to reopen sqlite: %v", err)
+	}
+	defer db2.Close()
+
+	// Verify WAL mode is still enabled
+	var journalMode string
+	if err := db2.QueryRow("PRAGMA journal_mode").Scan(&journalMode); err != nil {
+		t.Fatalf("failed to query journal mode: %v", err)
+	}
+	if journalMode != "wal" {
+		t.Errorf("journal_mode after reopen = %q, want %q", journalMode, "wal")
+	}
+
+	// Verify data persisted
+	got, err := sqliteGet(db2, []byte("key"))
+	if err != nil {
+		t.Fatalf("failed to get key after reopen: %v", err)
+	}
+	if string(got) != "value" {
+		t.Errorf("value after reopen = %q, want %q", got, "value")
+	}
+}
+
+func TestSQLiteConcurrentConnections(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+
+	// Open first connection
+	db1, err := openSQLite(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open sqlite first connection: %v", err)
+	}
+	defer db1.Close()
+
+	// Open second connection to same database - should not fail with lock error
+	db2, err := openSQLite(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open sqlite second connection: %v", err)
+	}
+	defer db2.Close()
+
+	// Both connections should be able to read
+	if _, err := sqliteKeys(db1); err != nil {
+		t.Errorf("db1 read failed: %v", err)
+	}
+	if _, err := sqliteKeys(db2); err != nil {
+		t.Errorf("db2 read failed: %v", err)
+	}
+
+	// Write from first connection
+	if err := sqliteSet(db1, []byte("from_db1"), []byte("value1")); err != nil {
+		t.Errorf("db1 write failed: %v", err)
+	}
+
+	// Second connection should see the write
+	got, err := sqliteGet(db2, []byte("from_db1"))
+	if err != nil {
+		t.Errorf("db2 read after db1 write failed: %v", err)
+	}
+	if string(got) != "value1" {
+		t.Errorf("db2 got %q, want %q", got, "value1")
+	}
+}
+
+func TestSQLiteMultipleConnectionsWriting(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+
+	// Simulate multiple processes by opening multiple connections
+	const numConnections = 3
+	const writesPerConnection = 5
+
+	var wg sync.WaitGroup
+	errors := make(chan error, numConnections*writesPerConnection)
+
+	for i := 0; i < numConnections; i++ {
+		wg.Add(1)
+		go func(connID int) {
+			defer wg.Done()
+
+			// Each goroutine opens its own connection (like separate processes)
+			db, err := openSQLite(dbPath)
+			if err != nil {
+				errors <- err
+				return
+			}
+			defer db.Close()
+
+			for j := 0; j < writesPerConnection; j++ {
+				key := []byte(filepath.Join("conn", string(rune('0'+connID)), "key", string(rune('0'+j))))
+				value := []byte("value")
+				if err := sqliteSet(db, key, value); err != nil {
+					errors <- err
+				}
+			}
+		}(i)
+	}
+
+	wg.Wait()
+	close(errors)
+
+	// Collect any errors
+	var errs []error
+	for err := range errors {
+		errs = append(errs, err)
+	}
+
+	if len(errs) > 0 {
+		t.Errorf("concurrent connection writes produced %d errors, first: %v", len(errs), errs[0])
+	}
+
+	// Verify all data was written
+	db, err := openSQLite(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open for verification: %v", err)
+	}
+	defer db.Close()
+
+	keys, err := sqliteKeys(db)
+	if err != nil {
+		t.Fatalf("failed to get keys: %v", err)
+	}
+	if len(keys) != numConnections*writesPerConnection {
+		t.Errorf("expected %d keys, got %d", numConnections*writesPerConnection, len(keys))
 	}
 }

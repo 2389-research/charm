@@ -175,6 +175,11 @@ func sqliteBackup(srcPath string, w io.Writer) error {
 	}
 	defer func() { _ = src.Close() }()
 
+	// Set busy timeout to handle concurrent access gracefully.
+	if _, err := src.Exec("PRAGMA busy_timeout=5000"); err != nil {
+		return fmt.Errorf("failed to set busy timeout for backup: %w", err)
+	}
+
 	// Create temporary file for VACUUM INTO output
 	tmpDir := filepath.Dir(srcPath)
 	tmpFile, err := os.CreateTemp(tmpDir, "backup-*.db")

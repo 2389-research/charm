@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"fmt"
 	"io/fs"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -129,6 +128,15 @@ func (kv *KV) nextSeq(name string) (uint64, error) {
 	return sm.Seq, nil
 }
 
+// syncFrom syncs from cloud backups with sequence numbers greater than mv.
+//
+// IMPORTANT: This is a FULL SNAPSHOT sync mechanism, not incremental.
+// Each backup is a complete database snapshot. When multiple backups exist,
+// only the LATEST one matters - earlier ones are superseded.
+//
+// This means: last-write-wins semantics. If device A writes at seq 10 and
+// device B writes at seq 11, syncing will result in only seq 11's data.
+// This is intentional - each write backs up the full database state.
 func (kv *KV) syncFrom(mv uint64) error {
 	seqDir, err := kv.fs.ReadDir(kv.name)
 	if err != nil {
@@ -147,32 +155,28 @@ func (kv *KV) syncFrom(mv uint64) error {
 		}
 	}
 
-	// Sort by sequence number to ensure backups are applied in order.
-	// This is critical for overwrites: if backup 2 overwrites a key from
-	// backup 1, we must restore backup 1 first, then backup 2.
-	sort.Slice(seqs, func(i, j int) bool {
-		return seqs[i] < seqs[j]
-	})
+	// No new backups to restore
+	if len(seqs) == 0 {
+		return nil
+	}
 
-	// Track highest sequence restored
+	// Since each backup is a FULL snapshot, we only need to restore the
+	// highest sequence number. Earlier backups are superseded by later ones.
 	var maxSeq uint64
-
-	// Restore in sequence order
 	for _, seq := range seqs {
-		err = kv.restoreSeq(seq)
-		if err != nil {
-			return err
-		}
 		if seq > maxSeq {
 			maxSeq = seq
 		}
 	}
 
-	// Update max_version to reflect the highest sequence we restored
-	if maxSeq > 0 {
-		if err := kv.setMaxVersion(maxSeq); err != nil {
-			return err
-		}
+	// Restore only the latest backup
+	if err := kv.restoreSeq(maxSeq); err != nil {
+		return err
+	}
+
+	// Update max_version to reflect the sequence we restored
+	if err := kv.setMaxVersion(maxSeq); err != nil {
+		return err
 	}
 
 	return nil

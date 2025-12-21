@@ -337,28 +337,28 @@ func (kv *KV) Client() *client.Client {
 // from the Charm Cloud.
 func (kv *KV) Reset() error {
 	dbPath := kv.dbPath
-	err := kv.db.Close()
-	if err != nil {
-		return err
+
+	// Close current database
+	if err := kv.db.Close(); err != nil {
+		return fmt.Errorf("failed to close database: %w", err)
 	}
 
 	// Remove database file and WAL files
-	if err := os.Remove(dbPath); err != nil && !os.IsNotExist(err) {
-		return err
-	}
-	walPath := dbPath + "-wal"
-	if err := os.Remove(walPath); err != nil && !os.IsNotExist(err) {
-		return err
-	}
-	shmPath := dbPath + "-shm"
-	if err := os.Remove(shmPath); err != nil && !os.IsNotExist(err) {
-		return err
+	for _, path := range []string{dbPath, dbPath + "-wal", dbPath + "-shm"} {
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			// Try to reopen the old database to keep the KV usable
+			if db, reopenErr := openSQLite(dbPath); reopenErr == nil {
+				kv.db = db
+			}
+			return fmt.Errorf("failed to remove %s: %w", path, err)
+		}
 	}
 
-	// Reopen database
+	// Reopen database - if this fails, the KV is left in an unusable state
+	// but we've already removed the files, so we can't recover
 	db, err := openSQLite(dbPath)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to reopen database after reset: %w", err)
 	}
 	kv.db = db
 	return kv.Sync()

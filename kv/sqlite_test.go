@@ -450,6 +450,14 @@ func TestSQLiteMultipleConnectionsWriting(t *testing.T) {
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "test.db")
 
+	// Pre-initialize the database with a single connection to avoid
+	// race conditions on WAL mode enablement.
+	initDB, err := openSQLite(dbPath)
+	if err != nil {
+		t.Fatalf("failed to pre-initialize database: %v", err)
+	}
+	_ = initDB.Close()
+
 	// Simulate multiple processes by opening multiple connections
 	const numConnections = 3
 	const writesPerConnection = 5

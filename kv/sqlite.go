@@ -220,13 +220,28 @@ func sqliteBackup(srcPath string, w io.Writer) error {
 	return nil
 }
 
+// SQLite magic bytes: "SQLite format 3\x00"
+var sqliteMagic = []byte("SQLite format 3\x00")
+
+// ErrNotSQLite indicates the data is not a valid SQLite database.
+// This typically happens when trying to restore old BadgerDB backups
+// after migrating to SQLite storage.
+var ErrNotSQLite = fmt.Errorf("data is not a valid SQLite database (possibly a pre-migration BadgerDB backup)")
+
 // sqliteRestore restores a database from the reader.
+// Returns ErrNotSQLite if the data is not a valid SQLite database.
 //
 //nolint:unused // Will be used in kv.go integration
 func sqliteRestore(r io.Reader, dstPath string) error {
 	data, err := io.ReadAll(r)
 	if err != nil {
 		return fmt.Errorf("failed to read backup data: %w", err)
+	}
+
+	// Validate SQLite magic bytes before writing.
+	// This prevents restoring old BadgerDB backups that would corrupt the database.
+	if len(data) < len(sqliteMagic) || string(data[:len(sqliteMagic)]) != string(sqliteMagic) {
+		return ErrNotSQLite
 	}
 
 	if err := os.WriteFile(dstPath, data, 0600); err != nil {

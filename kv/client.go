@@ -3,7 +3,9 @@ package kv
 import (
 	"bytes"
 	"fmt"
+	"io"
 	"io/fs"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -96,14 +98,32 @@ func (kv *KV) restoreSeq(seq uint64) error {
 	}
 	defer r.Close() // nolint:errcheck
 
+	// Read the backup data into memory first to validate it
+	data, err := io.ReadAll(r)
+	if err != nil {
+		return fmt.Errorf("failed to read backup: %w", err)
+	}
+
+	// Validate SQLite magic bytes before restoring.
+	// Old BadgerDB backups from before the SQLite migration will fail here.
+	if len(data) < len(sqliteMagic) || string(data[:len(sqliteMagic)]) != string(sqliteMagic) {
+		// This is an old BadgerDB backup - skip it and clean up from cloud
+		_ = kv.fs.Remove(kv.seqStorageKey(seq))
+		return ErrNotSQLite
+	}
+
 	// Close current DB
 	if err := kv.db.Close(); err != nil {
 		return err
 	}
 
-	// Restore from backup
-	if err := sqliteRestore(r, kv.dbPath); err != nil {
-		return err
+	// Write the validated SQLite backup
+	if err := os.WriteFile(kv.dbPath, data, 0600); err != nil {
+		// Try to reopen the original database
+		if db, reopenErr := openSQLite(kv.dbPath); reopenErr == nil {
+			kv.db = db
+		}
+		return fmt.Errorf("failed to write backup: %w", err)
 	}
 
 	// Reopen DB
@@ -137,6 +157,9 @@ func (kv *KV) nextSeq(name string) (uint64, error) {
 // This means: last-write-wins semantics. If device A writes at seq 10 and
 // device B writes at seq 11, syncing will result in only seq 11's data.
 // This is intentional - each write backs up the full database state.
+//
+// If old BadgerDB backups are found (from before the SQLite migration),
+// they are automatically cleaned up and skipped.
 func (kv *KV) syncFrom(mv uint64) error {
 	seqDir, err := kv.fs.ReadDir(kv.name)
 	if err != nil {
@@ -171,6 +194,17 @@ func (kv *KV) syncFrom(mv uint64) error {
 
 	// Restore only the latest backup
 	if err := kv.restoreSeq(maxSeq); err != nil {
+		// If this is an old BadgerDB backup, skip it and clean up all old backups
+		if err == ErrNotSQLite {
+			// Clean up remaining old backups
+			for _, seq := range seqs {
+				if seq != maxSeq { // maxSeq was already cleaned in restoreSeq
+					_ = kv.fs.Remove(kv.seqStorageKey(seq))
+				}
+			}
+			// Continue with the current (fresh) database
+			return nil
+		}
 		return err
 	}
 

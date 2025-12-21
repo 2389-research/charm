@@ -5,6 +5,7 @@ package kv
 
 import (
 	"bytes"
+	"os"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -323,6 +324,75 @@ func TestEscapeSQLiteString(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestSQLiteRestoreValidation(t *testing.T) {
+	dir := t.TempDir()
+
+	t.Run("rejects non-SQLite data", func(t *testing.T) {
+		// Simulate old BadgerDB backup data
+		badgerData := bytes.NewReader([]byte(`item:uuid-here{"data":"value"}`))
+		dstPath := filepath.Join(dir, "reject.db")
+
+		err := sqliteRestore(badgerData, dstPath)
+		if err != ErrNotSQLite {
+			t.Errorf("expected ErrNotSQLite, got %v", err)
+		}
+
+		// File should not have been created
+		if _, statErr := os.Stat(dstPath); !os.IsNotExist(statErr) {
+			t.Error("file should not exist when validation fails")
+		}
+	})
+
+	t.Run("accepts valid SQLite data", func(t *testing.T) {
+		// Create a valid SQLite database
+		srcPath := filepath.Join(dir, "source.db")
+		db, err := openSQLite(srcPath)
+		if err != nil {
+			t.Fatalf("failed to create source db: %v", err)
+		}
+		if err := sqliteSet(db, []byte("key"), []byte("value")); err != nil {
+			t.Fatalf("failed to write test data: %v", err)
+		}
+		db.Close()
+
+		// Read it back and restore to new location
+		srcData, err := os.ReadFile(srcPath)
+		if err != nil {
+			t.Fatalf("failed to read source: %v", err)
+		}
+
+		dstPath := filepath.Join(dir, "restored.db")
+		if err := sqliteRestore(bytes.NewReader(srcData), dstPath); err != nil {
+			t.Fatalf("restore failed: %v", err)
+		}
+
+		// Verify restored database works
+		restored, err := openSQLite(dstPath)
+		if err != nil {
+			t.Fatalf("failed to open restored: %v", err)
+		}
+		defer restored.Close()
+
+		val, err := sqliteGet(restored, []byte("key"))
+		if err != nil {
+			t.Fatalf("failed to read from restored: %v", err)
+		}
+		if string(val) != "value" {
+			t.Errorf("got %q, want %q", val, "value")
+		}
+	})
+
+	t.Run("rejects too-short data", func(t *testing.T) {
+		shortData := bytes.NewReader([]byte("tiny"))
+		dstPath := filepath.Join(dir, "short.db")
+
+		err := sqliteRestore(shortData, dstPath)
+		if err != ErrNotSQLite {
+			t.Errorf("expected ErrNotSQLite for short data, got %v", err)
+		}
+	})
 }
 
 func TestSQLiteWALModeEnabled(t *testing.T) {

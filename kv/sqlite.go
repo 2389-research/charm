@@ -10,9 +10,30 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 
 	_ "modernc.org/sqlite"
 )
+
+// recoveryLockFile creates and locks a file to serialize recovery operations
+// across concurrent goroutines/processes. Returns the lock file and cleanup func.
+func recoveryLockFile(dbPath string) (*os.File, func(), error) {
+	lockPath := dbPath + ".recovery.lock"
+	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0600)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to create lock file: %w", err)
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+		_ = f.Close()
+		return nil, nil, fmt.Errorf("failed to acquire lock: %w", err)
+	}
+	cleanup := func() {
+		_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+		_ = f.Close()
+		_ = os.Remove(lockPath)
+	}
+	return f, cleanup, nil
+}
 
 // isCorruptDatabaseError checks if an error indicates the database file is corrupt
 // or not a valid SQLite database. This can happen when old BadgerDB backup data
@@ -55,7 +76,22 @@ func openSQLite(path string) (*sql.DB, error) {
 
 // openSQLiteWithRecovery opens a SQLite database with optional corruption recovery.
 // If allowRecovery is true and the file is corrupt, it deletes the file and retries.
+// Uses a file lock to serialize concurrent recovery attempts across goroutines/processes.
 func openSQLiteWithRecovery(path string, allowRecovery bool) (*sql.DB, error) {
+	// Acquire lock to serialize recovery attempts across processes.
+	// This prevents SIGBUS when one process removes WAL files while another is using them.
+	_, cleanup, lockErr := recoveryLockFile(path)
+	if lockErr != nil {
+		// If we can't get the lock, proceed without it (best effort)
+		cleanup = func() {}
+	}
+	defer cleanup()
+
+	return openSQLiteCore(path, allowRecovery)
+}
+
+// openSQLiteCore does the actual database open work (called with lock held).
+func openSQLiteCore(path string, allowRecovery bool) (*sql.DB, error) {
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open sqlite: %w", err)
@@ -68,7 +104,7 @@ func openSQLiteWithRecovery(path string, allowRecovery bool) (*sql.DB, error) {
 		// Check for corruption and recover if allowed
 		if allowRecovery && isCorruptDatabaseError(err) {
 			if recoverErr := recoverCorruptDatabase(path); recoverErr == nil {
-				return openSQLiteWithRecovery(path, false) // Don't allow nested recovery
+				return openSQLiteCore(path, false) // Don't allow nested recovery
 			}
 		}
 		return nil, fmt.Errorf("failed to set busy timeout: %w", err)
@@ -83,7 +119,7 @@ func openSQLiteWithRecovery(path string, allowRecovery bool) (*sql.DB, error) {
 		// Check for corruption and recover if allowed
 		if allowRecovery && isCorruptDatabaseError(err) {
 			if recoverErr := recoverCorruptDatabase(path); recoverErr == nil {
-				return openSQLiteWithRecovery(path, false) // Don't allow nested recovery
+				return openSQLiteCore(path, false) // Don't allow nested recovery
 			}
 		}
 		return nil, fmt.Errorf("failed to query journal mode: %w", err)

@@ -3,7 +3,6 @@ package cmd
 
 import (
 	"fmt"
-	"os"
 
 	"github.com/charmbracelet/log"
 
@@ -20,10 +19,6 @@ var (
 	subtle    = styles.Subtle.Render
 )
 
-func printFormatted(s string) {
-	fmt.Println(paragraph(s) + "\n")
-}
-
 func getCharmConfig() *client.Config {
 	cfg, err := client.ConfigFromEnv()
 	if err != nil {
@@ -33,15 +28,13 @@ func getCharmConfig() *client.Config {
 	return cfg
 }
 
-func initCharmClient() *client.Client {
+func initCharmClient() (*client.Client, error) {
 	cfg := getCharmConfig()
 	cc, err := client.NewClient(cfg)
 	if err == charm.ErrMissingSSHAuth {
-		printFormatted("We were’t able to authenticate via SSH, which means there’s likely a problem with your key.\n\nYou can generate SSH keys by running " + code("charm keygen") + ". You can also set the environment variable " + code("CHARM_SSH_KEY_PATH") + " to point to a specific private key, or use " + code("-i") + "specifify a location.")
-		os.Exit(1)
+		return nil, fmt.Errorf("we weren't able to authenticate via SSH, which means there's likely a problem with your key.\n\nYou can generate SSH keys by running 'charm keygen'. You can also set the environment variable CHARM_SSH_KEY_PATH to point to a specific private key, or use -i to specify a location")
 	} else if err != nil {
-		fmt.Println(err)
-		os.Exit(1)
+		return nil, err
 	}
-	return cc
+	return cc, nil
 }

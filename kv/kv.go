@@ -2,12 +2,15 @@
 package kv
 
 import (
+	"context"
 	"database/sql"
 	"encoding/hex"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"sync"
+	"time"
 
 	"github.com/charmbracelet/charm/client"
 	"github.com/charmbracelet/charm/fs"
@@ -28,12 +31,24 @@ type KV struct {
 	cc       *client.Client
 	fs       *fs.FS
 	readOnly bool
+
+	// Backup batching state
+	backupMu      sync.Mutex
+	pendingWrites int
+	shutdown      chan struct{}
+	shutdownOnce  sync.Once
 }
 
 // Config holds optional configuration for opening a KV store.
 type Config struct {
 	customPath string
 }
+
+// Backup strategy constants
+const (
+	// Backup after this many writes have accumulated
+	backupWriteThreshold = 10
+)
 
 // Option is a functional option for configuring KV store opening.
 type Option func(*Config)
@@ -85,14 +100,17 @@ func openKV(cc *client.Client, name string, readOnly bool, opts ...Option) (*KV,
 		return nil, err
 	}
 
-	return &KV{
+	kv := &KV{
 		db:       db,
 		dbPath:   dbPath,
 		name:     name,
 		cc:       cc,
 		fs:       cfs,
 		readOnly: readOnly,
-	}, nil
+		shutdown: make(chan struct{}),
+	}
+
+	return kv, nil
 }
 
 // Open a Charm Cloud managed key-value store.
@@ -163,21 +181,91 @@ func OpenWithDefaultsFallback(name string, opts ...Option) (*KV, error) {
 }
 
 // Sync synchronizes the local database with any updates from the Charm Cloud.
+// This also flushes any pending writes to ensure they're backed up.
 func (kv *KV) Sync() error {
-	return kv.syncFrom(kv.maxVersion())
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	return kv.SyncWithContext(ctx)
 }
 
-// syncAfterWrite performs a cloud sync after a local write operation.
+// SyncWithContext synchronizes the local database with any updates from the Charm Cloud with context.
+// This also flushes any pending writes to ensure they're backed up.
+func (kv *KV) SyncWithContext(ctx context.Context) error {
+	// First, flush any pending writes
+	kv.backupMu.Lock()
+	hasPendingWrites := kv.pendingWrites > 0
+	if hasPendingWrites {
+		kv.pendingWrites = 0
+	}
+	kv.backupMu.Unlock()
+
+	// If we had pending writes, perform a backup now
+	if hasPendingWrites && !kv.readOnly {
+		if err := kv.performBackupWithContext(ctx); err != nil {
+			return err
+		}
+	}
+
+	// Then sync from cloud
+	return kv.syncFromWithContext(ctx, kv.maxVersion())
+}
+
+// syncAfterWrite tracks writes and triggers backup when threshold is reached.
+// Instead of backing up on every write, this batches writes and only syncs
+// when backupWriteThreshold is reached. This dramatically improves write
+// performance while maintaining safety through explicit Sync() calls.
 func (kv *KV) syncAfterWrite() error {
+	kv.backupMu.Lock()
+	kv.pendingWrites++
+	shouldBackup := kv.pendingWrites >= backupWriteThreshold
+	if shouldBackup {
+		kv.pendingWrites = 0
+	}
+	kv.backupMu.Unlock()
+
+	// Backup synchronously when threshold is reached
+	if shouldBackup {
+		return kv.performBackup()
+	}
+
+	return nil
+}
+
+// performBackup executes the actual backup operation.
+// This syncs from cloud, gets a new sequence number, and backs up the database.
+func (kv *KV) performBackup() error {
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	return kv.performBackupWithContext(ctx)
+}
+
+// performBackupWithContext executes the actual backup operation with context.
+// This syncs from cloud, gets a new sequence number, and backs up the database.
+func (kv *KV) performBackupWithContext(ctx context.Context) error {
+	return kv.doBackup(ctx, true)
+}
+
+// doBackup performs the actual backup. If checkShutdown is true, it will
+// skip the backup if the KV is shutting down.
+func (kv *KV) doBackup(ctx context.Context, checkShutdown bool) error {
+	// Check if we're shutting down (unless this is a close-time flush)
+	if checkShutdown {
+		select {
+		case <-kv.shutdown:
+			return nil
+		default:
+		}
+	}
+
 	// First sync any remote changes
 	mv := kv.maxVersion()
-	err := kv.syncFrom(mv)
+	err := kv.syncFromWithContext(ctx, mv)
 	if err != nil {
 		return err
 	}
 
 	// Get next sequence number
-	seq, err := kv.nextSeq(kv.name)
+	seq, err := kv.nextSeqWithContext(ctx, kv.name)
 	if err != nil {
 		return err
 	}
@@ -187,7 +275,7 @@ func (kv *KV) syncAfterWrite() error {
 		return err
 	}
 
-	// Always do a full backup
+	// Do the full backup
 	return kv.backupSeq(0, seq)
 }
 
@@ -202,8 +290,27 @@ func (kv *KV) setMaxVersion(v uint64) error {
 	return sqliteSetMeta(kv.db, "max_version", int64(v))
 }
 
-// Close closes the underlying database.
+// Close flushes any pending backups and closes the underlying database.
 func (kv *KV) Close() error {
+	// Signal shutdown FIRST to prevent any new backups from starting
+	kv.shutdownOnce.Do(func() {
+		close(kv.shutdown)
+	})
+
+	// Check if there are pending writes to flush
+	kv.backupMu.Lock()
+	pendingWrites := kv.pendingWrites
+	kv.pendingWrites = 0
+	kv.backupMu.Unlock()
+
+	// If there are pending writes, flush them now before closing
+	// Use doBackup with checkShutdown=false since we intentionally want to flush
+	if pendingWrites > 0 && !kv.readOnly {
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		_ = kv.doBackup(ctx, false) // Best effort - ignore errors during close
+		cancel()
+	}
+
 	return kv.db.Close()
 }
 

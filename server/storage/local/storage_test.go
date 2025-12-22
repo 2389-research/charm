@@ -348,3 +348,97 @@ func TestDelete(t *testing.T) {
 		}
 	})
 }
+
+func TestPathTraversalPrevention(t *testing.T) {
+	tdir := t.TempDir()
+	charmID := uuid.New().String()
+	lfs, err := NewLocalFileStore(tdir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Create a file outside the charmID directory that we'll try to access
+	outsideDir := filepath.Join(tdir, "outside")
+	err = os.MkdirAll(outsideDir, 0o700)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secretFile := filepath.Join(outsideDir, "secret.txt")
+	err = os.WriteFile(secretFile, []byte("secret data"), 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Test cases that should be rejected
+	maliciousPaths := []string{
+		"../../outside/secret.txt",
+		"../../../etc/passwd",
+		filepath.Join("..", "..", "outside", "secret.txt"),
+		"../outside/secret.txt",
+		"test/../../outside/secret.txt",
+	}
+
+	for _, malPath := range maliciousPaths {
+		t.Run("Get_"+malPath, func(t *testing.T) {
+			_, err := lfs.Get(charmID, malPath)
+			if err == nil {
+				t.Fatalf("expected error for path traversal attempt: %s", malPath)
+			}
+			if err != fs.ErrNotExist && !containsString(err.Error(), "path traversal") {
+				t.Fatalf("expected path traversal error for %s, got: %v", malPath, err)
+			}
+		})
+
+		t.Run("Put_"+malPath, func(t *testing.T) {
+			err := lfs.Put(charmID, malPath, bytes.NewBufferString("exploit"), fs.FileMode(0o644))
+			if err == nil {
+				t.Fatalf("expected error for path traversal attempt: %s", malPath)
+			}
+			if !containsString(err.Error(), "path traversal") && !containsString(err.Error(), "invalid path") {
+				t.Fatalf("expected path traversal error for %s, got: %v", malPath, err)
+			}
+		})
+
+		t.Run("Stat_"+malPath, func(t *testing.T) {
+			_, err := lfs.Stat(charmID, malPath)
+			if err == nil {
+				t.Fatalf("expected error for path traversal attempt: %s", malPath)
+			}
+			if err != fs.ErrNotExist && !containsString(err.Error(), "path traversal") {
+				t.Fatalf("expected path traversal error for %s, got: %v", malPath, err)
+			}
+		})
+
+		t.Run("Delete_"+malPath, func(t *testing.T) {
+			err := lfs.Delete(charmID, malPath)
+			if err == nil {
+				t.Fatalf("expected error for path traversal attempt: %s", malPath)
+			}
+			if !containsString(err.Error(), "path traversal") && !containsString(err.Error(), "invalid path") {
+				t.Fatalf("expected path traversal error for %s, got: %v", malPath, err)
+			}
+		})
+	}
+
+	// Verify the secret file still exists and wasn't accessed
+	data, err := os.ReadFile(secretFile)
+	if err != nil {
+		t.Fatal("secret file should still exist")
+	}
+	if string(data) != "secret data" {
+		t.Fatal("secret file should not have been modified")
+	}
+}
+
+func containsString(s, substr string) bool {
+	return len(s) >= len(substr) && (s == substr || len(s) > len(substr) && contains(s, substr))
+}
+
+func contains(s, substr string) bool {
+	for i := 0; i <= len(s)-len(substr); i++ {
+		if s[i:i+len(substr)] == substr {
+			return true
+		}
+	}
+	return false
+}

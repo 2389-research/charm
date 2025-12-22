@@ -171,6 +171,7 @@ func (cfs *FS) ReadFile(name string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	defer f.Close() // nolint:errcheck
 	_, err = io.Copy(buf, f)
 	if err != nil {
 		return nil, err
@@ -198,7 +199,6 @@ func (cfs *FS) WriteFile(name string, src fs.File) error {
 	if err := eb.Close(); err != nil {
 		return err
 	}
-	eb.Close() //nolint:errcheck
 	// To calculate the Content Length of a multipart request, we need to split
 	// the multipart into header, data body, and boundary footer and then
 	// calculate the length of each.
@@ -217,7 +217,6 @@ func (cfs *FS) WriteFile(name string, src fs.File) error {
 	if err := w.Close(); err != nil {
 		return err
 	}
-	w.Close() //nolint:errcheck
 	bounlen := databuf.Len()
 	boun := make([]byte, bounlen)
 	if _, err := databuf.Read(boun); err != nil {
@@ -225,6 +224,10 @@ func (cfs *FS) WriteFile(name string, src fs.File) error {
 	}
 	// headlen is the length of the multipart part header, bounlen is the length of the multipart boundary footer.
 	contentLength := int64(headlen) + int64(ebuf.Len()) + int64(bounlen)
+	ep, err := cfs.EncryptPath(name)
+	if err != nil {
+		return err
+	}
 	// pipe the multipart request to the server
 	rr, rw := io.Pipe()
 	defer rr.Close() // nolint:errcheck
@@ -254,10 +257,6 @@ func (cfs *FS) WriteFile(name string, src fs.File) error {
 			return
 		}
 	}()
-	ep, err := cfs.EncryptPath(name)
-	if err != nil {
-		return err
-	}
 	path := fmt.Sprintf("/v1/fs/%s?mode=%d", ep, info.Mode())
 	headers := http.Header{
 		"Content-Type":   []string{w.FormDataContentType()},
@@ -265,6 +264,9 @@ func (cfs *FS) WriteFile(name string, src fs.File) error {
 	}
 	resp, err := cfs.cc.AuthedRequest("POST", path, headers, rr)
 	if err != nil {
+		if resp != nil {
+			resp.Body.Close() // nolint:errcheck
+		}
 		return err
 	}
 	return resp.Body.Close()
@@ -279,6 +281,9 @@ func (cfs *FS) Remove(name string) error {
 	path := fmt.Sprintf("/v1/fs/%s", ep)
 	resp, err := cfs.cc.AuthedRequest("DELETE", path, nil, nil)
 	if err != nil {
+		if resp != nil {
+			resp.Body.Close() // nolint:errcheck
+		}
 		return err
 	}
 	return resp.Body.Close()

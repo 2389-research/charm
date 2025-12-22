@@ -2,6 +2,7 @@
 package crypt
 
 import (
+	"encoding/base64"
 	"encoding/hex"
 	"fmt"
 	"io"
@@ -103,7 +104,11 @@ func (cr *Crypt) EncryptLookupField(field string) (string, error) {
 	if field == "" {
 		return "", nil
 	}
-	ct, err := siv.Encrypt(nil, []byte(cr.keys[0].Key[:32]), []byte(field), nil)
+	keyBytes, err := decodeKey(cr.keys[0].Key)
+	if err != nil {
+		return "", fmt.Errorf("failed to decode encryption key: %w", err)
+	}
+	ct, err := siv.Encrypt(nil, keyBytes[:32], []byte(field), nil)
 	if err != nil {
 		return "", err
 	}
@@ -121,7 +126,11 @@ func (cr *Crypt) DecryptLookupField(field string) (string, error) {
 	}
 	var pt []byte
 	for _, k := range cr.keys {
-		pt, err = siv.Decrypt([]byte(k.Key[:32]), ct, nil)
+		keyBytes, err := decodeKey(k.Key)
+		if err != nil {
+			continue
+		}
+		pt, err = siv.Decrypt(keyBytes[:32], ct, nil)
 		if err == nil {
 			break
 		}
@@ -145,4 +154,22 @@ func (ew *EncryptedWriter) Write(p []byte) (int, error) {
 // Close closes the underlying io.WriteCloser.
 func (ew *EncryptedWriter) Close() error {
 	return ew.w.Close()
+}
+
+// decodeKey decodes a key string that may be either base64 or hex encoded.
+// It tries base64 first (the current format), then falls back to hex (for test compatibility).
+func decodeKey(key string) ([]byte, error) {
+	// Try base64 first (production format from client/crypt.go)
+	keyBytes, err := base64.StdEncoding.DecodeString(key)
+	if err == nil && len(keyBytes) >= 32 {
+		return keyBytes, nil
+	}
+
+	// Fall back to hex (test format from crypt_test.go)
+	keyBytes, err = hex.DecodeString(key)
+	if err == nil && len(keyBytes) >= 32 {
+		return keyBytes, nil
+	}
+
+	return nil, fmt.Errorf("key must be at least 32 bytes when decoded")
 }

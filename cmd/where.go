@@ -12,7 +12,10 @@ var WhereCmd = &cobra.Command{
 	Short: "Find where your cloud.charm.sh folder resides on your machine",
 	Long:  paragraph("Find the absolute path to your charm keys, databases, etc."),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		cc := initCharmClient()
+		cc, err := initCharmClient()
+		if err != nil {
+			return err
+		}
 		path, err := cc.DataPath()
 		if err != nil {
 			return err

@@ -70,8 +70,7 @@ var BackupKeysCmd = &cobra.Command{
 		}
 
 		if fileOrDirectoryExists(backupPath) {
-			fmt.Printf("Not creating backup file: %s already exists.\n\n", code(backupPath))
-			os.Exit(1)
+			return fmt.Errorf("not creating backup file: %s already exists", backupPath)
 		}
 
 		if err := os.MkdirAll(filepath.Dir(backupPath), 0o754); err != nil {

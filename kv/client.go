@@ -2,6 +2,7 @@ package kv
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"io/fs"
@@ -135,20 +136,20 @@ func (kv *KV) restoreSeq(seq uint64) error {
 	return nil
 }
 
-func (kv *KV) nextSeq(name string) (uint64, error) {
+func (kv *KV) nextSeqWithContext(ctx context.Context, name string) (uint64, error) {
 	var sm charm.SeqMsg
 	encName, err := kv.fs.EncryptPath(name)
 	if err != nil {
 		return 0, err
 	}
-	err = kv.cc.AuthedJSONRequest("POST", fmt.Sprintf("/v1/seq/%s", encName), nil, &sm)
+	err = kv.cc.AuthedJSONRequestWithContext(ctx, "POST", fmt.Sprintf("/v1/seq/%s", encName), nil, &sm)
 	if err != nil {
 		return 0, err
 	}
 	return sm.Seq, nil
 }
 
-// syncFrom syncs from cloud backups with sequence numbers greater than mv.
+// syncFromWithContext syncs from cloud backups with sequence numbers greater than mv.
 //
 // IMPORTANT: This is a FULL SNAPSHOT sync mechanism, not incremental.
 // Each backup is a complete database snapshot. When multiple backups exist,
@@ -160,7 +161,7 @@ func (kv *KV) nextSeq(name string) (uint64, error) {
 //
 // If old BadgerDB backups are found (from before the SQLite migration),
 // they are automatically cleaned up and skipped.
-func (kv *KV) syncFrom(mv uint64) error {
+func (kv *KV) syncFromWithContext(ctx context.Context, mv uint64) error {
 	seqDir, err := kv.fs.ReadDir(kv.name)
 	if err != nil {
 		return err

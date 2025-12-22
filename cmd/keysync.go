@@ -16,7 +16,10 @@ var KeySyncCmd = &cobra.Command{
 	Long:   paragraph(fmt.Sprintf("%s encrypt keys for all linked public keys", keyword("Re-encrypt"))),
 	Args:   cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		cc := initCharmClient()
+		cc, err := initCharmClient()
+		if err != nil {
+			return err
+		}
 		if err := cc.SyncEncryptKeys(); err != nil {
 			return err
 		}

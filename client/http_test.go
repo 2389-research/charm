@@ -26,6 +26,7 @@ func NewClientForTest(cfg *Config) *Client {
 		authLock:       &sync.Mutex{},
 		encryptKeyLock: &sync.Mutex{},
 		httpScheme:     "http",
+		httpClient:     &http.Client{Timeout: 30 * time.Second},
 	}
 	// Set valid claims so Auth() returns cached auth instead of attempting SSH connection
 	// We use a future expiration time so claims.Valid() returns nil

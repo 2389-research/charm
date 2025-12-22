@@ -2,12 +2,14 @@ package client
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	charm "github.com/charmbracelet/charm/proto"
 )
@@ -22,8 +24,15 @@ func (err ErrRequestTooLarge) Error() string {
 	return fmt.Sprintf("request too large: %d > %d", err.Size, err.Limit)
 }
 
-// AuthedRequest sends an authorized JSON request to the Charm and Glow HTTP servers.
+// AuthedJSONRequest sends an authorized JSON request to the Charm and Glow HTTP servers.
 func (cc *Client) AuthedJSONRequest(method string, path string, reqBody interface{}, respBody interface{}) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	return cc.AuthedJSONRequestWithContext(ctx, method, path, reqBody, respBody)
+}
+
+// AuthedJSONRequestWithContext sends an authorized JSON request to the Charm and Glow HTTP servers with context.
+func (cc *Client) AuthedJSONRequestWithContext(ctx context.Context, method string, path string, reqBody interface{}, respBody interface{}) error {
 	buf := &bytes.Buffer{}
 	err := json.NewEncoder(buf).Encode(reqBody)
 	if err != nil {
@@ -32,7 +41,7 @@ func (cc *Client) AuthedJSONRequest(method string, path string, reqBody interfac
 	headers := http.Header{
 		"Content-Type": []string{"application/json"},
 	}
-	resp, err := cc.AuthedRequest(method, path, headers, buf)
+	resp, err := cc.AuthedRequestWithContext(ctx, method, path, headers, buf)
 	if err != nil {
 		return err
 	}
@@ -45,15 +54,21 @@ func (cc *Client) AuthedJSONRequest(method string, path string, reqBody interfac
 }
 
 // AuthedRequest sends an authorized request to the Charm and Glow HTTP servers.
+// The httpClient has its own timeout configured, so no context timeout is applied here.
+// Callers who need cancellation should use AuthedRequestWithContext.
 func (cc *Client) AuthedRequest(method string, path string, headers http.Header, reqBody io.Reader) (*http.Response, error) {
-	client := &http.Client{}
+	return cc.AuthedRequestWithContext(context.Background(), method, path, headers, reqBody)
+}
+
+// AuthedRequestWithContext sends an authorized request to the Charm and Glow HTTP servers with context.
+func (cc *Client) AuthedRequestWithContext(ctx context.Context, method string, path string, headers http.Header, reqBody io.Reader) (*http.Response, error) {
 	cfg := cc.Config
 	auth, err := cc.Auth()
 	if err != nil {
 		return nil, err
 	}
 	jwt := auth.JWT
-	req, err := http.NewRequest(method, fmt.Sprintf("%s://%s:%d%s", cc.httpScheme, cfg.Host, cfg.HTTPPort, path), reqBody)
+	req, err := http.NewRequestWithContext(ctx, method, fmt.Sprintf("%s://%s:%d%s", cc.httpScheme, cfg.Host, cfg.HTTPPort, path), reqBody)
 	if err != nil {
 		return nil, err
 	}
@@ -66,7 +81,7 @@ func (cc *Client) AuthedRequest(method string, path string, headers http.Header,
 		}
 	}
 	req.Header.Add("Authorization", fmt.Sprintf("bearer %s", jwt))
-	resp, err := client.Do(req)
+	resp, err := cc.httpClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -88,4 +103,9 @@ func (cc *Client) AuthedRequest(method string, path string, headers http.Header,
 // AuthedRawRequest sends an authorized request with no request body to the Charm and Glow HTTP servers.
 func (cc *Client) AuthedRawRequest(method string, path string) (*http.Response, error) {
 	return cc.AuthedRequest(method, path, nil, nil)
+}
+
+// AuthedRawRequestWithContext sends an authorized request with no request body to the Charm and Glow HTTP servers with context.
+func (cc *Client) AuthedRawRequestWithContext(ctx context.Context, method string, path string) (*http.Response, error) {
+	return cc.AuthedRequestWithContext(ctx, method, path, nil, nil)
 }

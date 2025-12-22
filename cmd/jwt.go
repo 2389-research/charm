@@ -13,7 +13,10 @@ var JWTCmd = &cobra.Command{
 	Long:  paragraph(keyword("JSON Web Tokens") + " are a way to authenticate to different services that utilize your Charm account. Use " + code("jwt") + " to get one for your account."),
 	Args:  cobra.ArbitraryArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		cc := initCharmClient()
+		cc, err := initCharmClient()
+		if err != nil {
+			return err
+		}
 		jwt, err := cc.JWT(args...)
 		if err != nil {
 			return err

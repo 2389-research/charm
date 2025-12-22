@@ -13,7 +13,10 @@ var IDCmd = &cobra.Command{
 	Long:  paragraph("Want to know your " + keyword("Charm ID") + "? You’re in luck, kiddo."),
 	Args:  cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		cc := initCharmClient()
+		cc, err := initCharmClient()
+		if err != nil {
+			return err
+		}
 		id, err := cc.ID()
 		if err != nil {
 			return err

@@ -4,14 +4,18 @@
 package client
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
+	"time"
 
 	env "github.com/caarlos0/env/v6"
 	charm "github.com/charmbracelet/charm/proto"
@@ -44,6 +48,7 @@ type Client struct {
 	authLock             *sync.Mutex
 	sshConfig            *ssh.ClientConfig
 	httpScheme           string
+	httpClient           *http.Client
 	plainTextEncryptKeys []*charm.EncryptKey
 	authKeyPaths         []string
 	encryptKeyLock       *sync.Mutex
@@ -65,6 +70,21 @@ func NewClient(cfg *Config) (*Client, error) {
 		auth:           &charm.Auth{},
 		authLock:       &sync.Mutex{},
 		encryptKeyLock: &sync.Mutex{},
+		httpClient: &http.Client{
+			Timeout: 30 * time.Second,
+			Transport: &http.Transport{
+				Proxy: http.ProxyFromEnvironment,
+				DialContext: (&net.Dialer{
+					Timeout:   10 * time.Second,
+					KeepAlive: 30 * time.Second,
+				}).DialContext,
+				MaxIdleConns:          100,
+				MaxIdleConnsPerHost:   10,
+				IdleConnTimeout:       90 * time.Second,
+				TLSHandshakeTimeout:   10 * time.Second,
+				ExpectContinueTimeout: 1 * time.Second,
+			},
+		},
 	}
 
 	var sshKeys []string
@@ -129,7 +149,14 @@ func NewClientWithDefaults() (*Client, error) {
 
 // JWT returns a JSON web token for the user.
 func (cc *Client) JWT(aud ...string) (string, error) {
-	s, err := cc.sshSession()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	return cc.JWTWithContext(ctx, aud...)
+}
+
+// JWTWithContext returns a JSON web token for the user with context.
+func (cc *Client) JWTWithContext(ctx context.Context, aud ...string) (string, error) {
+	s, err := cc.sshSessionWithContext(ctx)
 	if err != nil {
 		return "", err
 	}
@@ -143,7 +170,14 @@ func (cc *Client) JWT(aud ...string) (string, error) {
 
 // ID returns the user's ID.
 func (cc *Client) ID() (string, error) {
-	s, err := cc.sshSession()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	return cc.IDWithContext(ctx)
+}
+
+// IDWithContext returns the user's ID with context.
+func (cc *Client) IDWithContext(ctx context.Context) (string, error) {
+	s, err := cc.sshSessionWithContext(ctx)
 	if err != nil {
 		return "", err
 	}
@@ -157,7 +191,14 @@ func (cc *Client) ID() (string, error) {
 
 // AuthorizedKeys returns the keys linked to a user's account.
 func (cc *Client) AuthorizedKeys() (string, error) {
-	s, err := cc.sshSession()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	return cc.AuthorizedKeysWithContext(ctx)
+}
+
+// AuthorizedKeysWithContext returns the keys linked to a user's account with context.
+func (cc *Client) AuthorizedKeysWithContext(ctx context.Context) (string, error) {
+	s, err := cc.sshSessionWithContext(ctx)
 	if err != nil {
 		return "", err
 	}
@@ -171,7 +212,14 @@ func (cc *Client) AuthorizedKeys() (string, error) {
 
 // AuthorizedKeysWithMetadata fetches keys linked to a user's account, with metadata.
 func (cc *Client) AuthorizedKeysWithMetadata() (*charm.Keys, error) {
-	s, err := cc.sshSession()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	return cc.AuthorizedKeysWithMetadataWithContext(ctx)
+}
+
+// AuthorizedKeysWithMetadataWithContext fetches keys linked to a user's account, with metadata, with context.
+func (cc *Client) AuthorizedKeysWithMetadataWithContext(ctx context.Context) (*charm.Keys, error) {
+	s, err := cc.sshSessionWithContext(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -236,12 +284,19 @@ func (cfg *Config) KeygenType() keygen.KeyType {
 
 // SetName sets the account's username.
 func (cc *Client) SetName(name string) (*charm.User, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	return cc.SetNameWithContext(ctx, name)
+}
+
+// SetNameWithContext sets the account's username with context.
+func (cc *Client) SetNameWithContext(ctx context.Context, name string) (*charm.User, error) {
 	if !ValidateName(name) {
 		return nil, charm.ErrNameInvalid
 	}
 	u := &charm.User{}
 	u.Name = name
-	err := cc.AuthedJSONRequest("POST", "/v1/bio", u, u)
+	err := cc.AuthedJSONRequestWithContext(ctx, "POST", "/v1/bio", u, u)
 	if err != nil {
 		return nil, err
 	}
@@ -250,12 +305,19 @@ func (cc *Client) SetName(name string) (*charm.User, error) {
 
 // Bio returns the user's profile.
 func (cc *Client) Bio() (*charm.User, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	return cc.BioWithContext(ctx)
+}
+
+// BioWithContext returns the user's profile with context.
+func (cc *Client) BioWithContext(ctx context.Context) (*charm.User, error) {
 	u := &charm.User{}
-	id, err := cc.ID()
+	id, err := cc.IDWithContext(ctx)
 	if err != nil {
 		return nil, err
 	}
-	err = cc.AuthedJSONRequest("GET", fmt.Sprintf("/v1/id/%s", id), u, u)
+	err = cc.AuthedJSONRequestWithContext(ctx, "GET", fmt.Sprintf("/v1/id/%s", id), u, u)
 	if err != nil {
 		return nil, err
 	}
@@ -271,16 +333,58 @@ func ValidateName(name string) bool {
 }
 
 func (cc *Client) sshSession() (*ssh.Session, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	return cc.sshSessionWithContext(ctx)
+}
+
+func (cc *Client) sshSessionWithContext(ctx context.Context) (*ssh.Session, error) {
 	cfg := cc.Config
-	c, err := ssh.Dial("tcp", fmt.Sprintf("%s:%d", cfg.Host, cfg.SSHPort), cc.sshConfig)
-	if err != nil {
-		return nil, err
+
+	// Create a channel to receive the result
+	type result struct {
+		session *ssh.Session
+		conn    *ssh.Client
+		err     error
 	}
-	s, err := c.NewSession()
-	if err != nil {
-		return nil, err
+	resultCh := make(chan result, 1)
+
+	go func() {
+		c, err := ssh.Dial("tcp", fmt.Sprintf("%s:%d", cfg.Host, cfg.SSHPort), cc.sshConfig)
+		if err != nil {
+			resultCh <- result{nil, nil, err}
+			return
+		}
+		s, err := c.NewSession()
+		if err != nil {
+			c.Close() // nolint:errcheck
+			resultCh <- result{nil, nil, err}
+			return
+		}
+		resultCh <- result{s, c, nil}
+	}()
+
+	select {
+	case <-ctx.Done():
+		// Clean up any connection/session that might have been created
+		// Use a timeout to prevent goroutine leak if SSH dial hangs forever
+		go func() {
+			select {
+			case res := <-resultCh:
+				if res.session != nil {
+					res.session.Close() // nolint:errcheck
+				}
+				if res.conn != nil {
+					res.conn.Close() // nolint:errcheck
+				}
+			case <-time.After(100 * time.Millisecond):
+				// Connection goroutine didn't finish in time - it will clean up itself
+			}
+		}()
+		return nil, ctx.Err()
+	case res := <-resultCh:
+		return res.session, res.err
 	}
-	return s, nil
 }
 
 // DataPath return the directory a Charm user's data is stored. It will default

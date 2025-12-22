@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/charmbracelet/log"
@@ -115,7 +116,10 @@ func (sl *SSHLinker) User() *charm.User {
 // LinkGen implements the proto.LinkTransport interface for the SSHLinker.
 func (me *SSHServer) LinkGen(lt charm.LinkTransport) error {
 	u := lt.User()
-	tok := me.NewToken()
+	tok, err := me.NewToken()
+	if err != nil {
+		return fmt.Errorf("failed to create token: %w", err)
+	}
 	defer me.db.DeleteToken(tok) // nolint:errcheck
 	me.linkQueue.InitLinkRequest(tok)
 	defer me.linkQueue.DeleteLinkRequest(tok)
@@ -256,17 +260,17 @@ func (me *SSHServer) LinkRequest(lt charm.LinkTransport, key string, token strin
 }
 
 // NewToken creates and returns a new Token.
-func (me *SSHServer) NewToken() charm.Token {
+func (me *SSHServer) NewToken() (charm.Token, error) {
 	t := toktok.GenerateToken(6, []rune("ABCDEFHJKLMNPRSTUWXY369"))
 	tok := charm.Token(t)
 	err := me.db.SetToken(tok)
 	if err != nil && err != charm.ErrTokenExists {
-		panic(err)
+		return "", fmt.Errorf("failed to set token: %w", err)
 	}
 	if err == charm.ErrTokenExists {
 		return me.NewToken()
 	}
-	return tok
+	return tok, nil
 }
 
 func (me *SSHServer) handleLinkGenAPI(s ssh.Session) {
@@ -363,11 +367,14 @@ func (me *SSHServer) handleAPIUnlink(s ssh.Session) {
 
 type channelLinkQueue struct {
 	s            *SSHServer
+	mu           sync.Mutex
 	linkRequests map[charm.Token]chan *charm.Link
 }
 
 // InitLinkRequest implements the proto.LinkQueue interface for the channelLinkQueue.
 func (s *channelLinkQueue) InitLinkRequest(t charm.Token) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if _, ok := s.linkRequests[t]; !ok {
 		log.Error("Making new link for token", "token", t)
 		lr := make(chan *charm.Link)
@@ -383,6 +390,8 @@ func (s *channelLinkQueue) ValidateLinkRequest(t charm.Token) bool {
 
 // WaitLinkRequest implements the proto.LinkQueue interface for the channelLinkQueue.
 func (s *channelLinkQueue) WaitLinkRequest(t charm.Token) (chan *charm.Link, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	lr, ok := s.linkRequests[t]
 	if !ok {
 		return nil, fmt.Errorf("no link request for token: %s", t)
@@ -404,5 +413,7 @@ func (s *channelLinkQueue) SendLinkRequest(lt charm.LinkTransport, lc chan *char
 
 // DeleteLinkRequest implements the proto.LinkTransport interface for the channelLinkQueue.
 func (s *channelLinkQueue) DeleteLinkRequest(tok charm.Token) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	delete(s.linkRequests, tok)
 }

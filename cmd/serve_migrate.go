@@ -31,7 +31,10 @@ var ServeMigrationCmd = &cobra.Command{
 		if err != nil {
 			return fmt.Errorf("database does not exist: %s", err)
 		}
-		db := sqlite.NewDB(dp)
+		db, err := sqlite.NewDB(dp)
+		if err != nil {
+			return fmt.Errorf("failed to open database: %w", err)
+		}
 		for _, m := range []migration.Migration{
 			migration.Migration0001,
 		} {

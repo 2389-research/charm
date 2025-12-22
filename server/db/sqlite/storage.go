@@ -28,19 +28,19 @@ type DB struct {
 }
 
 // NewDB creates a new DB in the given path.
-func NewDB(path string) *DB {
+func NewDB(path string) (*DB, error) {
 	var err error
 	log.Debug("Opening SQLite db", "path", path)
 	db, err := sql.Open("sqlite", path+DbOptions)
 	if err != nil {
-		panic(err)
+		return nil, fmt.Errorf("failed to open SQLite database: %w", err)
 	}
 	d := &DB{db: db}
 	err = d.CreateDB()
 	if err != nil {
-		panic(err)
+		return nil, fmt.Errorf("failed to create database schema: %w", err)
 	}
-	return d
+	return d, nil
 }
 
 // UserCount returns the number of users.

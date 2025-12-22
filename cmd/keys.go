@@ -39,7 +39,10 @@ var KeysCmd = &cobra.Command{
 			}
 			return nil
 		}
-		cc := initCharmClient()
+		cc, err := initCharmClient()
+		if err != nil {
+			return err
+		}
 
 		// Print randomart with fingerprints
 		k, err := cc.AuthorizedKeysWithMetadata()

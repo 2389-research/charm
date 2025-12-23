@@ -352,3 +352,111 @@ func TestReset_RemovesWALAndSHM(t *testing.T) {
 		t.Error("expected database to exist after reset")
 	}
 }
+
+func TestWipe_DeletesLocalFiles(t *testing.T) {
+	tmpDir := t.TempDir()
+	kvDir := filepath.Join(tmpDir, "kv")
+	if err := os.MkdirAll(kvDir, 0700); err != nil {
+		t.Fatalf("failed to create kv dir: %v", err)
+	}
+	dbPath := filepath.Join(kvDir, "test.db")
+
+	// Create a database with data
+	db, err := openSQLite(dbPath)
+	if err != nil {
+		t.Fatalf("failed to create test database: %v", err)
+	}
+	_, err = db.Exec("INSERT INTO kv (key, value) VALUES (?, ?)", []byte("key1"), []byte("value1"))
+	if err != nil {
+		t.Fatalf("failed to insert test data: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("failed to close database: %v", err)
+	}
+
+	// Create WAL and SHM files
+	walPath := dbPath + "-wal"
+	shmPath := dbPath + "-shm"
+	if err := os.WriteFile(walPath, []byte("wal data"), 0600); err != nil {
+		t.Fatalf("failed to create WAL file: %v", err)
+	}
+	if err := os.WriteFile(shmPath, []byte("shm data"), 0600); err != nil {
+		t.Fatalf("failed to create SHM file: %v", err)
+	}
+
+	// Wipe should delete all files
+	result, err := Wipe("test", WithPath(tmpDir))
+	if err != nil {
+		t.Fatalf("Wipe failed: %v", err)
+	}
+
+	// Should have deleted 3 files
+	if result.LocalFilesDeleted != 3 {
+		t.Errorf("expected 3 local files deleted, got %d", result.LocalFilesDeleted)
+	}
+
+	// All files should be gone
+	if _, err := os.Stat(dbPath); !os.IsNotExist(err) {
+		t.Error("expected database to be deleted after wipe")
+	}
+	if _, err := os.Stat(walPath); !os.IsNotExist(err) {
+		t.Error("expected WAL file to be deleted after wipe")
+	}
+	if _, err := os.Stat(shmPath); !os.IsNotExist(err) {
+		t.Error("expected SHM file to be deleted after wipe")
+	}
+}
+
+func TestWipe_NonExistentDatabase(t *testing.T) {
+	tmpDir := t.TempDir()
+	kvDir := filepath.Join(tmpDir, "kv")
+	if err := os.MkdirAll(kvDir, 0700); err != nil {
+		t.Fatalf("failed to create kv dir: %v", err)
+	}
+
+	// Wipe on non-existent database should succeed with 0 files deleted
+	result, err := Wipe("nonexistent", WithPath(tmpDir))
+	if err != nil {
+		t.Fatalf("Wipe failed: %v", err)
+	}
+
+	if result.LocalFilesDeleted != 0 {
+		t.Errorf("expected 0 local files deleted, got %d", result.LocalFilesDeleted)
+	}
+}
+
+func TestWipeResult_String(t *testing.T) {
+	tests := []struct {
+		name     string
+		result   *WipeResult
+		contains string
+	}{
+		{
+			name:     "no data",
+			result:   &WipeResult{},
+			contains: "no data to wipe",
+		},
+		{
+			name:     "local only",
+			result:   &WipeResult{LocalFilesDeleted: 3},
+			contains: "3 local files deleted",
+		},
+		{
+			name:     "cloud and local",
+			result:   &WipeResult{CloudBackupsDeleted: 5, LocalFilesDeleted: 3},
+			contains: "5 cloud backups deleted",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := tt.result.String()
+			if s == "" {
+				t.Error("expected non-empty string")
+			}
+			if !contains(s, tt.contains) {
+				t.Errorf("expected string to contain %q, got %q", tt.contains, s)
+			}
+		})
+	}
+}

@@ -2,7 +2,7 @@
 
 ## Overview
 
-Add database repair functionality to chronicle via a new `kv.Repair()` function in the charm library, exposed through `chronicle sync repair` and `chronicle sync reset` commands.
+Add database repair functionality to chronicle via new `kv.Repair()`, `kv.Reset()`, and `kv.Wipe()` functions in the charm library, exposed through chronicle CLI commands.
 
 ## Problem
 
@@ -12,6 +12,8 @@ SQLite databases using WAL mode can become corrupted, particularly the SHM (shar
 
 ```go
 // In github.com/charmbracelet/charm/kv
+
+// === REPAIR ===
 
 // RepairResult contains details of repair operations performed.
 type RepairResult struct {
@@ -26,9 +28,27 @@ type RepairResult struct {
 
 // Repair attempts to fix a corrupted database.
 // Steps: checkpoint WAL -> remove SHM -> integrity check -> vacuum
-// If force=true and integrity fails, attempts REINDEX recovery,
-// then resets from cloud as last resort.
+// If force=true and integrity fails, attempts REINDEX recovery.
 func Repair(name string, force bool, opts ...Option) (*RepairResult, error)
+
+// === RESET ===
+
+// Reset deletes the local database and pulls fresh data from Charm Cloud.
+// This discards any unsynced local changes.
+func Reset(name string, opts ...Option) error
+
+// === WIPE ===
+
+// WipeResult contains details of wipe operations performed.
+type WipeResult struct {
+    CloudBackupsDeleted int   // Number of cloud backups deleted
+    LocalFilesDeleted   int   // Number of local files deleted
+    Error               error // Non-fatal warning
+}
+
+// Wipe permanently deletes all data for a KV store, both local and cloud.
+// This is destructive and cannot be undone.
+func Wipe(name string, opts ...Option) (*WipeResult, error)
 ```
 
 ## Chronicle CLI Commands
@@ -47,11 +67,11 @@ Steps performed:
   4. Vacuum database
 
 Flags:
-  --force   If corruption persists, attempt recovery and reset from cloud
+  --force   If corruption persists, attempt REINDEX recovery
 
 Examples:
   chronicle sync repair          # Safe repair
-  chronicle sync repair --force  # Aggressive repair with cloud reset fallback
+  chronicle sync repair --force  # Aggressive repair with REINDEX recovery
 ```
 
 ### `chronicle sync reset`
@@ -65,7 +85,24 @@ Useful when local data is corrupted beyond repair.
 Requires confirmation prompt.
 ```
 
-Note: This differs from `sync wipe` which deletes data from cloud too.
+### `chronicle sync wipe`
+
+```
+Usage: chronicle sync wipe
+
+Permanently delete ALL data, both local and cloud.
+This cannot be undone!
+
+Requires confirmation prompt.
+```
+
+## Command Summary
+
+| Command | Local Data | Cloud Data | Use Case |
+|---------|------------|------------|----------|
+| `repair` | Fix in place | Unchanged | Corruption, WAL/SHM issues |
+| `reset` | Delete & re-sync | Unchanged | Local corruption, fresh start |
+| `wipe` | Delete | Delete | Complete data removal |
 
 ## Repair Implementation Logic
 
@@ -94,14 +131,9 @@ Repair(name, force) flow:
    - REINDEX
    - PRAGMA writable_schema=OFF
    - Re-check integrity
-   - If still broken -> goto step 6
+   - If still broken -> return error
 
-6. Cloud reset (force only):
-   - Close and delete local DB files
-   - Open fresh KV with same name
-   - Call Sync() to pull from cloud
-
-7. Vacuum (if integrity OK):
+6. Vacuum (if integrity OK):
    - VACUUM
    - Return success
 ```
@@ -128,29 +160,51 @@ Repairing chronicle database...
   ✓ SHM file removed
   ✗ Integrity check failed: database disk image is malformed
 
-Repair incomplete. Run with --force to attempt recovery and cloud reset.
+Repair incomplete. Run with --force to attempt recovery.
 ```
 
-**Force repair with cloud reset:**
+**Reset from cloud:**
 ```
-$ chronicle sync repair --force
-Repairing chronicle database...
-  ✓ WAL checkpointed
-  ✓ SHM file removed
-  ✗ Integrity check failed
-  ✗ Recovery attempt failed
-  ✓ Reset from cloud (47 entries restored)
+$ chronicle sync reset
+This will delete your local database and re-download from Charm Cloud.
+Any unsynced local data will be lost.
 
-Repair complete.
+Continue? [y/N] y
+
+Resetting chronicle database...
+  ✓ Local database deleted
+  ✓ Synced from cloud (47 entries)
+
+Reset complete.
 ```
 
-## Implementation Plan
+**Wipe all data:**
+```
+$ chronicle sync wipe
+WARNING: This will permanently delete ALL chronicle data!
+This includes local AND cloud data. This cannot be undone.
 
-1. **Charm library** (separate PR to 2389-research/charm):
-   - Add `Repair(name string, force bool, opts ...Option) (*RepairResult, error)`
-   - Add `Reset(name string, opts ...Option) error` for cloud-only reset
+Type 'wipe' to confirm: wipe
 
-2. **Chronicle CLI**:
-   - Add `syncRepairCmd` with `--force` flag
-   - Add `syncResetCmd` with confirmation prompt
-   - Wire up to charm's `kv.Repair()` and display results
+Wiping chronicle database...
+  ✓ 3 cloud backups deleted
+  ✓ 3 local files deleted
+
+Wipe complete.
+```
+
+## Implementation Status
+
+### Charm library (DONE)
+
+- [x] `Repair(name string, force bool, opts ...Option) (*RepairResult, error)`
+- [x] `Reset(name string, opts ...Option) error`
+- [x] `Wipe(name string, opts ...Option) (*WipeResult, error)`
+- [x] Tests for all functions
+
+### Chronicle CLI (TODO)
+
+- [ ] Add `syncRepairCmd` with `--force` flag
+- [ ] Add `syncResetCmd` with confirmation prompt
+- [ ] Add `syncWipeCmd` with confirmation prompt
+- [ ] Wire up to charm's KV functions and display results

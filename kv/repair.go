@@ -280,9 +280,11 @@ func repairFreshDatabase(dbPath string, result *RepairResult) (*RepairResult, er
 	return result, nil
 }
 
-// Reset deletes the local database and creates a fresh one.
-// If a client is available (via OpenWithDefaults or passed via options),
-// it will sync from Charm Cloud after reset.
+// Reset deletes the local database and pulls fresh data from Charm Cloud.
+// This discards any unsynced local changes.
+//
+// Use WithPath for testing with a custom data directory.
+// Without WithPath, uses the default Charm client to connect to cloud.
 func Reset(name string, opts ...Option) error {
 	// Apply options to get configuration
 	cfg := &Config{}
@@ -290,22 +292,29 @@ func Reset(name string, opts ...Option) error {
 		opt(cfg)
 	}
 
-	// Determine database path
-	var dataDir string
+	// If custom path is set, do local-only reset (for testing)
 	if cfg.customPath != "" {
-		dataDir = cfg.customPath
-	} else {
-		// Use default client to get data path
-		cc, err := client.NewClientWithDefaults()
-		if err != nil {
-			return fmt.Errorf("failed to create client: %w", err)
-		}
-		dataDir, err = cc.DataPath()
-		if err != nil {
-			return fmt.Errorf("failed to get data path: %w", err)
-		}
+		return resetLocal(name, cfg.customPath)
 	}
 
+	// Open KV with defaults to get cloud sync capability
+	kv, err := OpenWithDefaults(name)
+	if err != nil {
+		return fmt.Errorf("failed to open KV for reset: %w", err)
+	}
+
+	// Use the existing Reset method which deletes local and syncs from cloud
+	if err := kv.Reset(); err != nil {
+		_ = kv.Close()
+		return fmt.Errorf("reset failed: %w", err)
+	}
+
+	return kv.Close()
+}
+
+// resetLocal performs a local-only reset without cloud sync.
+// Used for testing with custom paths.
+func resetLocal(name, dataDir string) error {
 	dbPath := filepath.Join(dataDir, "kv", name+".db")
 	walPath := dbPath + "-wal"
 	shmPath := dbPath + "-shm"
@@ -334,4 +343,117 @@ func Reset(name string, opts ...Option) error {
 	}
 
 	return nil
+}
+
+// WipeResult contains details of wipe operations performed.
+type WipeResult struct {
+	CloudBackupsDeleted int   // Number of cloud backups deleted
+	LocalFilesDeleted   int   // Number of local files deleted
+	Error               error // Non-fatal warning
+}
+
+// String returns a human-readable summary of the wipe result.
+func (r *WipeResult) String() string {
+	var parts []string
+	if r.CloudBackupsDeleted > 0 {
+		parts = append(parts, fmt.Sprintf("%d cloud backups deleted", r.CloudBackupsDeleted))
+	}
+	if r.LocalFilesDeleted > 0 {
+		parts = append(parts, fmt.Sprintf("%d local files deleted", r.LocalFilesDeleted))
+	}
+	if r.Error != nil {
+		parts = append(parts, fmt.Sprintf("warning: %v", r.Error))
+	}
+	if len(parts) == 0 {
+		return "no data to wipe"
+	}
+	return strings.Join(parts, ", ")
+}
+
+// Wipe permanently deletes all data for a KV store, both local and cloud.
+// This is destructive and cannot be undone.
+//
+// Use WithPath for testing with a custom data directory (local-only wipe).
+// Without WithPath, uses the default Charm client to delete cloud data too.
+func Wipe(name string, opts ...Option) (*WipeResult, error) {
+	result := &WipeResult{}
+
+	// Apply options to get configuration
+	cfg := &Config{}
+	for _, opt := range opts {
+		opt(cfg)
+	}
+
+	// If custom path is set, do local-only wipe (for testing)
+	if cfg.customPath != "" {
+		return wipeLocal(name, cfg.customPath, result)
+	}
+
+	// Open KV with defaults to get cloud access
+	kv, err := OpenWithDefaults(name)
+	if err != nil {
+		// If we can't open, try to at least clean up local files
+		cc, clientErr := client.NewClientWithDefaults()
+		if clientErr != nil {
+			return result, fmt.Errorf("failed to create client: %w", err)
+		}
+		dataDir, pathErr := cc.DataPath()
+		if pathErr != nil {
+			return result, fmt.Errorf("failed to get data path: %w", err)
+		}
+		return wipeLocal(name, dataDir, result)
+	}
+	defer func() { _ = kv.Close() }()
+
+	// Delete cloud backups
+	seqDir, err := kv.fs.ReadDir(name)
+	if err == nil {
+		for _, de := range seqDir {
+			seqKey := name + "/" + de.Name()
+			if err := kv.fs.Remove(seqKey); err != nil {
+				result.Error = fmt.Errorf("failed to delete cloud backup %s: %w", seqKey, err)
+			} else {
+				result.CloudBackupsDeleted++
+			}
+		}
+	}
+
+	// Get data path for local cleanup
+	dataDir, err := kv.cc.DataPath()
+	if err != nil {
+		return result, fmt.Errorf("failed to get data path: %w", err)
+	}
+
+	// Close KV before deleting local files
+	if err := kv.Close(); err != nil {
+		result.Error = fmt.Errorf("failed to close KV: %w", err)
+	}
+
+	// Delete local files
+	localResult, err := wipeLocal(name, dataDir, &WipeResult{})
+	if err != nil {
+		return result, err
+	}
+	result.LocalFilesDeleted = localResult.LocalFilesDeleted
+
+	return result, nil
+}
+
+// wipeLocal deletes local database files only.
+func wipeLocal(name, dataDir string, result *WipeResult) (*WipeResult, error) {
+	dbPath := filepath.Join(dataDir, "kv", name+".db")
+	walPath := dbPath + "-wal"
+	shmPath := dbPath + "-shm"
+
+	for _, path := range []string{dbPath, walPath, shmPath} {
+		if err := os.Remove(path); err != nil {
+			if !os.IsNotExist(err) {
+				return result, fmt.Errorf("failed to remove %s: %w", path, err)
+			}
+		} else {
+			result.LocalFilesDeleted++
+		}
+	}
+
+	return result, nil
 }

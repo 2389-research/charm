@@ -42,7 +42,20 @@ type KV struct {
 // Config holds optional configuration for opening a KV store.
 type Config struct {
 	customPath string
+
+	// Retry settings for write lock acquisition
+	writeRetryAttempts  int           // Number of retries (0 = no retry)
+	writeRetryBaseDelay time.Duration // Initial delay between retries
+	writeRetryMaxDelay  time.Duration // Maximum delay cap
+	retryConfigured     bool          // True if retry was explicitly configured
 }
+
+// Default retry settings
+const (
+	DefaultWriteRetryAttempts  = 3
+	DefaultWriteRetryBaseDelay = 50 * time.Millisecond
+	DefaultWriteRetryMaxDelay  = 500 * time.Millisecond
+)
 
 // Backup strategy constants
 const (
@@ -57,6 +70,39 @@ type Option func(*Config)
 func WithPath(path string) Option {
 	return func(c *Config) {
 		c.customPath = path
+	}
+}
+
+// WithWriteRetry configures retry behavior for acquiring write locks.
+// attempts is the number of retries (0 = no retry, just fail or fallback).
+// baseDelay is the initial delay between retries (doubles each attempt).
+// maxDelay caps the maximum delay between retries.
+func WithWriteRetry(attempts int, baseDelay, maxDelay time.Duration) Option {
+	return func(c *Config) {
+		c.writeRetryAttempts = attempts
+		c.writeRetryBaseDelay = baseDelay
+		c.writeRetryMaxDelay = maxDelay
+		c.retryConfigured = true
+	}
+}
+
+// WithNoWriteRetry disables retry behavior, falling back to read-only immediately.
+// This preserves the pre-v0.18 behavior.
+func WithNoWriteRetry() Option {
+	return func(c *Config) {
+		c.writeRetryAttempts = 0
+		c.writeRetryBaseDelay = 0
+		c.writeRetryMaxDelay = 0
+		c.retryConfigured = true
+	}
+}
+
+// applyRetryDefaults sets default retry values if not explicitly configured.
+func applyRetryDefaults(cfg *Config) {
+	if !cfg.retryConfigured {
+		cfg.writeRetryAttempts = DefaultWriteRetryAttempts
+		cfg.writeRetryBaseDelay = DefaultWriteRetryBaseDelay
+		cfg.writeRetryMaxDelay = DefaultWriteRetryMaxDelay
 	}
 }
 
@@ -155,29 +201,79 @@ func (kv *KV) IsReadOnly() bool {
 // OpenWithFallback opens a Charm Cloud managed key-value store, automatically
 // falling back to read-only mode if another process holds the lock.
 // Use IsReadOnly() to check which mode was used.
+//
+// By default, retries acquiring write access with exponential backoff before
+// falling back to read-only. Use WithNoWriteRetry() to disable retry behavior.
 func OpenWithFallback(cc *client.Client, name string, opts ...Option) (*KV, error) {
-	kv, err := Open(cc, name, opts...)
-	if err == nil {
-		return kv, nil
+	// Parse config for retry settings
+	cfg := &Config{}
+	for _, opt := range opts {
+		opt(cfg)
 	}
-	if IsLocked(err) {
-		return OpenReadOnly(cc, name, opts...)
+	applyRetryDefaults(cfg)
+
+	var lastErr error
+	delay := cfg.writeRetryBaseDelay
+
+	for attempt := 0; attempt <= cfg.writeRetryAttempts; attempt++ {
+		kv, err := Open(cc, name, opts...)
+		if err == nil {
+			return kv, nil
+		}
+
+		if !IsLocked(err) {
+			return nil, err // Non-lock error, fail immediately
+		}
+
+		lastErr = err
+		if attempt < cfg.writeRetryAttempts {
+			time.Sleep(delay)
+			delay = min(delay*2, cfg.writeRetryMaxDelay)
+		}
 	}
-	return nil, err
+
+	// All retries exhausted, fall back to read-only
+	_ = lastErr // Acknowledge we're falling back due to lock
+	return OpenReadOnly(cc, name, opts...)
 }
 
 // OpenWithDefaultsFallback opens a Charm Cloud managed key-value store with
 // default settings, automatically falling back to read-only mode if another
 // process holds the lock. Use IsReadOnly() to check which mode was used.
+//
+// By default, retries acquiring write access with exponential backoff before
+// falling back to read-only. Use WithNoWriteRetry() to disable retry behavior.
 func OpenWithDefaultsFallback(name string, opts ...Option) (*KV, error) {
-	kv, err := OpenWithDefaults(name, opts...)
-	if err == nil {
-		return kv, nil
+	// Parse config for retry settings
+	cfg := &Config{}
+	for _, opt := range opts {
+		opt(cfg)
 	}
-	if IsLocked(err) {
-		return OpenWithDefaultsReadOnly(name, opts...)
+	applyRetryDefaults(cfg)
+
+	var lastErr error
+	delay := cfg.writeRetryBaseDelay
+
+	for attempt := 0; attempt <= cfg.writeRetryAttempts; attempt++ {
+		kv, err := OpenWithDefaults(name, opts...)
+		if err == nil {
+			return kv, nil
+		}
+
+		if !IsLocked(err) {
+			return nil, err // Non-lock error, fail immediately
+		}
+
+		lastErr = err
+		if attempt < cfg.writeRetryAttempts {
+			time.Sleep(delay)
+			delay = min(delay*2, cfg.writeRetryMaxDelay)
+		}
 	}
-	return nil, err
+
+	// All retries exhausted, fall back to read-only
+	_ = lastErr // Acknowledge we're falling back due to lock
+	return OpenWithDefaultsReadOnly(name, opts...)
 }
 
 // Sync synchronizes the local database with any updates from the Charm Cloud.
@@ -469,4 +565,54 @@ func (kv *KV) Reset() error {
 	}
 	kv.db = db
 	return kv.Sync()
+}
+
+// Do opens a KV store, executes the provided function, and closes the store.
+// This is the recommended API for MCP servers and other processes that should
+// not hold a database connection open for extended periods.
+//
+// The lock is only held for the duration of fn, allowing other processes to
+// write between calls.
+func Do(name string, fn func(*KV) error, opts ...Option) (err error) {
+	kv, err := OpenWithDefaults(name, opts...)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if closeErr := kv.Close(); closeErr != nil && err == nil {
+			err = closeErr
+		}
+	}()
+	return fn(kv)
+}
+
+// DoReadOnly opens a KV store in read-only mode, executes the function, and closes.
+// Use this for read operations when you don't need to write.
+func DoReadOnly(name string, fn func(*KV) error, opts ...Option) (err error) {
+	kv, err := OpenWithDefaultsReadOnly(name, opts...)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if closeErr := kv.Close(); closeErr != nil && err == nil {
+			err = closeErr
+		}
+	}()
+	return fn(kv)
+}
+
+// DoWithFallback opens a KV store with fallback behavior, executes the function,
+// and closes. If write access cannot be acquired after retries, falls back to
+// read-only mode. Use kv.IsReadOnly() inside fn to check which mode was obtained.
+func DoWithFallback(name string, fn func(*KV) error, opts ...Option) (err error) {
+	kv, err := OpenWithDefaultsFallback(name, opts...)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if closeErr := kv.Close(); closeErr != nil && err == nil {
+			err = closeErr
+		}
+	}()
+	return fn(kv)
 }

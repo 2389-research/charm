@@ -162,6 +162,23 @@ func openSQLiteCore(path string, allowRecovery bool) (*sql.DB, error) {
 			value      BLOB,
 			created_at INTEGER NOT NULL
 		);
+
+		-- Op log table: records all write operations for incremental sync.
+		-- Uses UUID op_id for idempotency (same op can be applied multiple times safely).
+		-- Uses hybrid logical clock (HLC) for ordering and conflict resolution.
+		CREATE TABLE IF NOT EXISTS op_log (
+			op_id         TEXT PRIMARY KEY,
+			seq           INTEGER NOT NULL,
+			op_type       TEXT NOT NULL CHECK (op_type IN ('set', 'delete')),
+			key           BLOB NOT NULL,
+			value         BLOB,
+			hlc_timestamp INTEGER NOT NULL,
+			device_id     TEXT NOT NULL,
+			synced        INTEGER DEFAULT 0
+		);
+
+		CREATE INDEX IF NOT EXISTS idx_op_log_synced ON op_log(synced, seq);
+		CREATE INDEX IF NOT EXISTS idx_op_log_key ON op_log(key, hlc_timestamp DESC);
 	`
 	if _, err := db.Exec(schema); err != nil {
 		_ = db.Close()
@@ -210,6 +227,8 @@ func sqliteDelete(db *sql.DB, key []byte) error {
 
 // sqliteSetWithPendingOp stores a key-value pair and records a pending op atomically.
 // This ensures the pending op is tracked durably with the write.
+//
+//nolint:unused // Replaced by setWithOpLog in kv.go which also logs to op_log
 func sqliteSetWithPendingOp(db *sql.DB, key, value []byte) error {
 	tx, err := db.Begin()
 	if err != nil {
@@ -237,6 +256,8 @@ func sqliteSetWithPendingOp(db *sql.DB, key, value []byte) error {
 
 // sqliteDeleteWithPendingOp removes a key and records a pending op atomically.
 // This ensures the pending op is tracked durably with the delete.
+//
+//nolint:unused // Replaced by deleteWithOpLog in kv.go which also logs to op_log
 func sqliteDeleteWithPendingOp(db *sql.DB, key []byte) error {
 	tx, err := db.Begin()
 	if err != nil {

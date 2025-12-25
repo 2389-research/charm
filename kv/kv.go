@@ -37,6 +37,10 @@ type KV struct {
 	pendingWrites int
 	shutdown      chan struct{}
 	shutdownOnce  sync.Once
+
+	// Op-log state for Phase 3 incremental sync
+	hlc        *HLC   // Hybrid logical clock for ordering
+	localDevID string // Stable device identifier
 }
 
 // Config holds optional configuration for opening a KV store.
@@ -146,14 +150,22 @@ func openKV(cc *client.Client, name string, readOnly bool, opts ...Option) (*KV,
 		return nil, err
 	}
 
+	// Get device ID for op-log (use charm user ID if available)
+	var devID string
+	if user, err := cc.Auth(); err == nil && user != nil {
+		devID = user.ID
+	}
+
 	kv := &KV{
-		db:       db,
-		dbPath:   dbPath,
-		name:     name,
-		cc:       cc,
-		fs:       cfs,
-		readOnly: readOnly,
-		shutdown: make(chan struct{}),
+		db:         db,
+		dbPath:     dbPath,
+		name:       name,
+		cc:         cc,
+		fs:         cfs,
+		readOnly:   readOnly,
+		shutdown:   make(chan struct{}),
+		hlc:        NewHLC(),
+		localDevID: devID,
 	}
 
 	return kv, nil
@@ -511,11 +523,59 @@ func (kv *KV) Set(key []byte, value []byte) error {
 	if err != nil {
 		return err
 	}
-	// Use transactional set that also records the pending op
-	if err := sqliteSetWithPendingOp(kv.db, key, encValue); err != nil {
+	// Use transactional set that records pending op and op-log entry
+	if err := kv.setWithOpLog(key, encValue); err != nil {
 		return err
 	}
 	return kv.syncAfterWrite()
+}
+
+// setWithOpLog stores a key-value pair with both pending_ops and op_log tracking.
+func (kv *KV) setWithOpLog(key, encValue []byte) error {
+	tx, err := kv.db.Begin()
+	if err != nil {
+		return fmt.Errorf("failed to begin transaction: %w", err)
+	}
+
+	// Store the key-value pair
+	_, err = tx.Exec("INSERT OR REPLACE INTO kv (key, value) VALUES (?, ?)", key, encValue)
+	if err != nil {
+		_ = tx.Rollback()
+		return fmt.Errorf("failed to set key: %w", err)
+	}
+
+	// Record pending op (for current full-backup sync)
+	if err := recordPendingOp(tx, "set", key, encValue); err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+
+	// Record op-log entry (for future incremental sync)
+	seq, err := getNextSeq(kv.db)
+	if err != nil {
+		_ = tx.Rollback()
+		return fmt.Errorf("failed to get next seq: %w", err)
+	}
+
+	op := &Op{
+		OpID:         newOpID(),
+		Seq:          seq,
+		OpType:       "set",
+		Key:          key,
+		Value:        encValue,
+		HLCTimestamp: kv.hlc.Now(),
+		DeviceID:     kv.localDevID,
+		Synced:       false,
+	}
+	if err := logOp(tx, op); err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("failed to commit transaction: %w", err)
+	}
+	return nil
 }
 
 // SetReader is a convenience method to set the value for a key to the data
@@ -544,11 +604,59 @@ func (kv *KV) Delete(key []byte) error {
 	if kv.readOnly {
 		return &ErrReadOnlyMode{Operation: "delete key"}
 	}
-	// Use transactional delete that also records the pending op
-	if err := sqliteDeleteWithPendingOp(kv.db, key); err != nil {
+	// Use transactional delete that records pending op and op-log entry
+	if err := kv.deleteWithOpLog(key); err != nil {
 		return err
 	}
 	return kv.syncAfterWrite()
+}
+
+// deleteWithOpLog removes a key with both pending_ops and op_log tracking.
+func (kv *KV) deleteWithOpLog(key []byte) error {
+	tx, err := kv.db.Begin()
+	if err != nil {
+		return fmt.Errorf("failed to begin transaction: %w", err)
+	}
+
+	// Delete the key
+	_, err = tx.Exec("DELETE FROM kv WHERE key = ?", key)
+	if err != nil {
+		_ = tx.Rollback()
+		return fmt.Errorf("failed to delete key: %w", err)
+	}
+
+	// Record pending op (for current full-backup sync)
+	if err := recordPendingOp(tx, "delete", key, nil); err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+
+	// Record op-log entry (for future incremental sync)
+	seq, err := getNextSeq(kv.db)
+	if err != nil {
+		_ = tx.Rollback()
+		return fmt.Errorf("failed to get next seq: %w", err)
+	}
+
+	op := &Op{
+		OpID:         newOpID(),
+		Seq:          seq,
+		OpType:       "delete",
+		Key:          key,
+		Value:        nil,
+		HLCTimestamp: kv.hlc.Now(),
+		DeviceID:     kv.localDevID,
+		Synced:       false,
+	}
+	if err := logOp(tx, op); err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("failed to commit transaction: %w", err)
+	}
+	return nil
 }
 
 // Keys returns a list of all keys for this key value store.

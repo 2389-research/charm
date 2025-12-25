@@ -70,22 +70,8 @@ func (kv *KV) seqStorageKey(seq uint64) string {
 }
 
 func (kv *KV) backupSeq(from uint64, at uint64) error {
-	buf := bytes.NewBuffer(nil)
-	err := sqliteBackup(kv.dbPath, buf)
-	if err != nil {
-		return err
-	}
-	name := kv.seqStorageKey(at)
-	src := &kvFile{
-		data: buf,
-		info: &kvFileInfo{
-			name:    name,
-			size:    int64(buf.Len()),
-			mode:    fs.FileMode(0o660),
-			modTime: time.Now(),
-		},
-	}
-	return kv.fs.WriteFile(name, src)
+	// Use manifest-based backup for idempotent uploads
+	return kv.backupWithManifest(at)
 }
 
 func (kv *KV) restoreSeq(seq uint64) error {
@@ -93,11 +79,18 @@ func (kv *KV) restoreSeq(seq uint64) error {
 	if seq == 0 {
 		return nil
 	}
-	r, err := kv.fs.Open(kv.seqStorageKey(seq))
+
+	// Try to find the backup key using manifest first, then fall back to old format
+	backupKey, err := kv.findBackupKey(seq)
 	if err != nil {
 		return err
 	}
-	defer r.Close() // nolint:errcheck
+
+	r, err := kv.fs.Open(backupKey)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = r.Close() }()
 
 	// Read the backup data into memory first to validate it
 	data, err := io.ReadAll(r)
@@ -109,7 +102,7 @@ func (kv *KV) restoreSeq(seq uint64) error {
 	// Old BadgerDB backups from before the SQLite migration will fail here.
 	if len(data) < len(sqliteMagic) || string(data[:len(sqliteMagic)]) != string(sqliteMagic) {
 		// This is an old BadgerDB backup - skip it and clean up from cloud
-		_ = kv.fs.Remove(kv.seqStorageKey(seq))
+		_ = kv.fs.Remove(backupKey)
 		return ErrNotSQLite
 	}
 
@@ -134,6 +127,23 @@ func (kv *KV) restoreSeq(seq uint64) error {
 	}
 	kv.db = db
 	return nil
+}
+
+// findBackupKey finds the storage key for a backup by sequence number.
+// Checks manifest first (new format), then falls back to old format.
+func (kv *KV) findBackupKey(seq uint64) (string, error) {
+	// Try manifest first
+	manifest, err := kv.loadManifest()
+	if err == nil && len(manifest.Backups) > 0 {
+		for _, b := range manifest.Backups {
+			if b.Seq == seq {
+				return b.StorageKey(kv.name), nil
+			}
+		}
+	}
+
+	// Fall back to old format: {name}/{seq}
+	return kv.seqStorageKey(seq), nil
 }
 
 func (kv *KV) nextSeqWithContext(ctx context.Context, name string) (uint64, error) {
@@ -162,6 +172,44 @@ func (kv *KV) nextSeqWithContext(ctx context.Context, name string) (uint64, erro
 // If old BadgerDB backups are found (from before the SQLite migration),
 // they are automatically cleaned up and skipped.
 func (kv *KV) syncFromWithContext(ctx context.Context, mv uint64) error {
+	// Try manifest-based sync first (new format)
+	manifest, manifestErr := kv.loadManifest()
+	if manifestErr == nil && manifest.LatestSeq > mv {
+		return kv.syncFromManifest(manifest, mv)
+	}
+
+	// Fall back to directory scan for backward compatibility with old backups
+	return kv.syncFromDirectoryScan(mv)
+}
+
+// syncFromManifest syncs using the manifest file (new format).
+func (kv *KV) syncFromManifest(manifest *Manifest, mv uint64) error {
+	// Get the latest backup that's newer than our version
+	latest := manifest.LatestBackup()
+	if latest == nil || latest.Seq <= mv {
+		return nil // No new backups
+	}
+
+	// Restore the latest backup
+	if err := kv.restoreSeq(latest.Seq); err != nil {
+		if err == ErrNotSQLite {
+			// Corrupted backup in manifest - this shouldn't happen with new backups
+			// but handle it gracefully
+			return nil
+		}
+		return err
+	}
+
+	// Update max_version to reflect the sequence we restored
+	if err := kv.setMaxVersion(latest.Seq); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// syncFromDirectoryScan syncs using directory listing (old format, backward compatible).
+func (kv *KV) syncFromDirectoryScan(mv uint64) error {
 	seqDir, err := kv.fs.ReadDir(kv.name)
 	if err != nil {
 		return err
@@ -170,9 +218,15 @@ func (kv *KV) syncFromWithContext(ctx context.Context, mv uint64) error {
 	// Collect sequence numbers to restore
 	var seqs []uint64
 	for _, de := range seqDir {
-		seq, err := strconv.ParseUint(de.Name(), 10, 64)
+		name := de.Name()
+		// Skip manifest.json and content-addressed backups (contain '-')
+		if name == "manifest.json" || strings.Contains(name, "-") {
+			continue
+		}
+		seq, err := strconv.ParseUint(name, 10, 64)
 		if err != nil {
-			return fmt.Errorf("invalid sequence file name %q: %w", de.Name(), err)
+			// Skip files that aren't sequence numbers
+			continue
 		}
 		if seq > mv {
 			seqs = append(seqs, seq)

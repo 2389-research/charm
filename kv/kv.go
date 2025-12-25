@@ -286,19 +286,42 @@ func (kv *KV) Sync() error {
 
 // SyncWithContext synchronizes the local database with any updates from the Charm Cloud with context.
 // This also flushes any pending writes to ensure they're backed up.
+// Uses a sync lock to prevent concurrent Sync() calls from racing.
 func (kv *KV) SyncWithContext(ctx context.Context) error {
-	// First, flush any pending writes
+	// Acquire sync lock to prevent concurrent sync operations.
+	// This is important for cross-process safety.
+	return withSyncLock(kv.db, func() error {
+		return kv.syncWithContextLocked(ctx)
+	})
+}
+
+// syncWithContextLocked performs the actual sync work (must be called with sync lock held).
+func (kv *KV) syncWithContextLocked(ctx context.Context) error {
+	// Check both in-memory counter and durable pending_ops table.
+	// In-memory catches writes from this session, pending_ops catches any
+	// that might have survived a crash.
 	kv.backupMu.Lock()
-	hasPendingWrites := kv.pendingWrites > 0
-	if hasPendingWrites {
+	hasPendingInMemory := kv.pendingWrites > 0
+	if hasPendingInMemory {
 		kv.pendingWrites = 0
 	}
 	kv.backupMu.Unlock()
+
+	hasPendingDurable, err := hasPendingOps(kv.db)
+	if err != nil {
+		return fmt.Errorf("failed to check pending ops: %w", err)
+	}
+
+	hasPendingWrites := hasPendingInMemory || hasPendingDurable
 
 	// If we had pending writes, perform a backup now
 	if hasPendingWrites && !kv.readOnly {
 		if err := kv.performBackupWithContext(ctx); err != nil {
 			return err
+		}
+		// Clear pending ops after successful backup
+		if err := clearPendingOps(kv.db); err != nil {
+			return fmt.Errorf("failed to clear pending ops: %w", err)
 		}
 	}
 
@@ -488,7 +511,8 @@ func (kv *KV) Set(key []byte, value []byte) error {
 	if err != nil {
 		return err
 	}
-	if err := sqliteSet(kv.db, key, encValue); err != nil {
+	// Use transactional set that also records the pending op
+	if err := sqliteSetWithPendingOp(kv.db, key, encValue); err != nil {
 		return err
 	}
 	return kv.syncAfterWrite()
@@ -520,7 +544,8 @@ func (kv *KV) Delete(key []byte) error {
 	if kv.readOnly {
 		return &ErrReadOnlyMode{Operation: "delete key"}
 	}
-	if err := sqliteDelete(kv.db, key); err != nil {
+	// Use transactional delete that also records the pending op
+	if err := sqliteDeleteWithPendingOp(kv.db, key); err != nil {
 		return err
 	}
 	return kv.syncAfterWrite()

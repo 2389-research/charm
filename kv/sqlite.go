@@ -89,6 +89,21 @@ func openSQLiteCore(path string, allowRecovery bool) (*sql.DB, error) {
 		return nil, fmt.Errorf("failed to set busy timeout: %w", err)
 	}
 
+	// Set synchronous mode for durability.
+	// NORMAL provides good balance between durability and performance.
+	// In WAL mode, NORMAL guarantees no corruption and only risks losing
+	// the last transaction on power failure (acceptable for our use case).
+	if _, err := db.Exec("PRAGMA synchronous=NORMAL"); err != nil {
+		_ = db.Close()
+		// Check for corruption and recover if allowed
+		if allowRecovery && isCorruptDatabaseError(err) {
+			if recoverErr := recoverCorruptDatabase(path); recoverErr == nil {
+				return openSQLiteCore(path, false) // Don't allow nested recovery
+			}
+		}
+		return nil, fmt.Errorf("failed to set synchronous mode: %w", err)
+	}
+
 	// Check current journal mode - only enable WAL if not already set.
 	// This avoids lock contention when multiple processes open the same database,
 	// since PRAGMA journal_mode=WAL requires an exclusive lock to switch modes.
@@ -128,6 +143,25 @@ func openSQLiteCore(path string, allowRecovery bool) (*sql.DB, error) {
 			name  TEXT PRIMARY KEY,
 			value INTEGER NOT NULL
 		) WITHOUT ROWID;
+
+		-- Sync lock table: prevents concurrent Sync() calls from racing.
+		-- Uses a singleton row (id=1) with expiring lease.
+		CREATE TABLE IF NOT EXISTS sync_lock (
+			id          INTEGER PRIMARY KEY CHECK (id = 1),
+			holder      TEXT NOT NULL,
+			acquired_at INTEGER NOT NULL,
+			expires_at  INTEGER NOT NULL
+		);
+
+		-- Pending ops table: tracks writes that haven't been synced to cloud.
+		-- This makes pending writes durable across process restarts.
+		CREATE TABLE IF NOT EXISTS pending_ops (
+			id         INTEGER PRIMARY KEY AUTOINCREMENT,
+			op_type    TEXT NOT NULL CHECK (op_type IN ('set', 'delete')),
+			key        BLOB NOT NULL,
+			value      BLOB,
+			created_at INTEGER NOT NULL
+		);
 	`
 	if _, err := db.Exec(schema); err != nil {
 		_ = db.Close()
@@ -170,6 +204,58 @@ func sqliteDelete(db *sql.DB, key []byte) error {
 	_, err := db.Exec("DELETE FROM kv WHERE key = ?", key)
 	if err != nil {
 		return fmt.Errorf("failed to delete key: %w", err)
+	}
+	return nil
+}
+
+// sqliteSetWithPendingOp stores a key-value pair and records a pending op atomically.
+// This ensures the pending op is tracked durably with the write.
+func sqliteSetWithPendingOp(db *sql.DB, key, value []byte) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	// Store the key-value pair
+	_, err = tx.Exec("INSERT OR REPLACE INTO kv (key, value) VALUES (?, ?)", key, value)
+	if err != nil {
+		return fmt.Errorf("failed to set key: %w", err)
+	}
+
+	// Record the pending op
+	if err := recordPendingOp(tx, "set", key, value); err != nil {
+		return err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("failed to commit transaction: %w", err)
+	}
+	return nil
+}
+
+// sqliteDeleteWithPendingOp removes a key and records a pending op atomically.
+// This ensures the pending op is tracked durably with the delete.
+func sqliteDeleteWithPendingOp(db *sql.DB, key []byte) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	// Delete the key
+	_, err = tx.Exec("DELETE FROM kv WHERE key = ?", key)
+	if err != nil {
+		return fmt.Errorf("failed to delete key: %w", err)
+	}
+
+	// Record the pending op
+	if err := recordPendingOp(tx, "delete", key, nil); err != nil {
+		return err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("failed to commit transaction: %w", err)
 	}
 	return nil
 }

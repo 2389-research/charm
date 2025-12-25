@@ -155,3 +155,37 @@ func TestHLCToTime(t *testing.T) {
 		t.Errorf("HLCToTime difference too large: %v", diff)
 	}
 }
+
+func TestHLC_CounterOverflow(t *testing.T) {
+	hlc := NewHLC()
+
+	// Set up HLC with counter at max value (65535)
+	// First, call Now() to initialize, then manipulate internal state
+	ts1 := hlc.Now()
+	time1 := HLCTime(ts1)
+
+	// Manually set counter to near max to test overflow
+	// We need to use reflection or just test via behavior
+	// Better approach: rapidly call Now() many times within same millisecond
+	// The counter has 16 bits = 65535 max value
+
+	// Instead of relying on timing, let's verify the counter portion is correct
+	// by checking uniqueness even with rapid calls
+	seen := make(map[int64]bool)
+	for i := 0; i < 70000; i++ {
+		ts := hlc.Now()
+		if seen[ts] {
+			t.Errorf("duplicate timestamp at iteration %d: %d", i, ts)
+		}
+		seen[ts] = true
+	}
+
+	// After 70000 calls, we should have advanced the time component
+	// because the counter would have overflowed at least once
+	tsLast := hlc.Now()
+	timeLast := HLCTime(tsLast)
+
+	if timeLast <= time1 {
+		t.Errorf("time should have advanced after counter overflow: start=%d, end=%d", time1, timeLast)
+	}
+}

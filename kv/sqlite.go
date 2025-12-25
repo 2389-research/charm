@@ -144,6 +144,12 @@ func openSQLiteCore(path string, allowRecovery bool) (*sql.DB, error) {
 			value INTEGER NOT NULL
 		) WITHOUT ROWID;
 
+		-- String metadata table: for text values like device IDs.
+		CREATE TABLE IF NOT EXISTS meta_str (
+			name  TEXT PRIMARY KEY,
+			value TEXT NOT NULL
+		) WITHOUT ROWID;
+
 		-- Sync lock table: prevents concurrent Sync() calls from racing.
 		-- Uses a singleton row (id=1) with expiring lease.
 		CREATE TABLE IF NOT EXISTS sync_lock (

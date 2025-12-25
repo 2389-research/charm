@@ -161,7 +161,25 @@ func getLatestHLCForKey(db *sql.DB, key []byte) (int64, error) {
 	return hlc.Int64, nil
 }
 
+// getNextSeqTx returns the next local sequence number within a transaction.
+// IMPORTANT: This must be called within the same transaction that inserts
+// the new op to avoid race conditions with concurrent writers.
+func getNextSeqTx(tx *sql.Tx) (int64, error) {
+	var maxSeq sql.NullInt64
+	err := tx.QueryRow("SELECT MAX(seq) FROM op_log").Scan(&maxSeq)
+	if err != nil {
+		return 0, fmt.Errorf("failed to get max seq: %w", err)
+	}
+	if !maxSeq.Valid {
+		return 1, nil
+	}
+	return maxSeq.Int64 + 1, nil
+}
+
 // getNextSeq returns the next local sequence number.
+// WARNING: This is not safe for concurrent use - use getNextSeqTx instead.
+//
+//nolint:unused // Kept for backward compatibility, prefer getNextSeqTx
 func getNextSeq(db *sql.DB) (int64, error) {
 	var maxSeq sql.NullInt64
 	err := db.QueryRow("SELECT MAX(seq) FROM op_log").Scan(&maxSeq)

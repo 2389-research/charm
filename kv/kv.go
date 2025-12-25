@@ -120,6 +120,41 @@ func applyRetryDefaults(cfg *Config) {
 	}
 }
 
+// getOrCreateDeviceID returns a stable device identifier for this database.
+// Priority:
+// 1. Charm user ID (if authenticated)
+// 2. Previously stored device ID in meta_str table
+// 3. Generate and store a new UUID
+func getOrCreateDeviceID(db *sql.DB, cc *client.Client) (string, error) {
+	// Try to get Charm user ID first (provides cross-device user identity)
+	if cc != nil {
+		if id, err := cc.ID(); err == nil && id != "" {
+			return id, nil
+		}
+	}
+
+	// Check for stored device ID in meta_str table
+	var devID string
+	err := db.QueryRow("SELECT value FROM meta_str WHERE name = 'device_id'").Scan(&devID)
+	if err == nil && devID != "" {
+		return devID, nil
+	}
+	if err != nil && err != sql.ErrNoRows {
+		return "", fmt.Errorf("failed to query device ID: %w", err)
+	}
+
+	// Generate a new device ID
+	devID = newOpID() // Uses UUID
+
+	// Store it for future use
+	_, err = db.Exec("INSERT OR REPLACE INTO meta_str (name, value) VALUES ('device_id', ?)", devID)
+	if err != nil {
+		return "", fmt.Errorf("failed to store device ID: %w", err)
+	}
+
+	return devID, nil
+}
+
 // openKV opens a KV store with the given client, name, read-only mode, and options.
 func openKV(cc *client.Client, name string, readOnly bool, opts ...Option) (*KV, error) {
 	// Apply options
@@ -160,10 +195,11 @@ func openKV(cc *client.Client, name string, readOnly bool, opts ...Option) (*KV,
 		return nil, err
 	}
 
-	// Get device ID for op-log (use charm user ID if available)
-	var devID string
-	if user, err := cc.Auth(); err == nil && user != nil {
-		devID = user.ID
+	// Get device ID for op-log (use charm user ID if available, otherwise generate stable UUID)
+	devID, err := getOrCreateDeviceID(db, cc)
+	if err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("failed to get device ID: %w", err)
 	}
 
 	kv := &KV{
@@ -607,7 +643,8 @@ func (kv *KV) setWithOpLog(key, encValue []byte) error {
 	}
 
 	// Record op-log entry (for future incremental sync)
-	seq, err := getNextSeq(kv.db)
+	// IMPORTANT: Use getNextSeqTx within the transaction to avoid race conditions
+	seq, err := getNextSeqTx(tx)
 	if err != nil {
 		_ = tx.Rollback()
 		return fmt.Errorf("failed to get next seq: %w", err)
@@ -688,7 +725,8 @@ func (kv *KV) deleteWithOpLog(key []byte) error {
 	}
 
 	// Record op-log entry (for future incremental sync)
-	seq, err := getNextSeq(kv.db)
+	// IMPORTANT: Use getNextSeqTx within the transaction to avoid race conditions
+	seq, err := getNextSeqTx(tx)
 	if err != nil {
 		_ = tx.Rollback()
 		return fmt.Errorf("failed to get next seq: %w", err)

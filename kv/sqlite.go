@@ -215,16 +215,17 @@ func sqliteSetWithPendingOp(db *sql.DB, key, value []byte) error {
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
-	defer func() { _ = tx.Rollback() }()
 
 	// Store the key-value pair
 	_, err = tx.Exec("INSERT OR REPLACE INTO kv (key, value) VALUES (?, ?)", key, value)
 	if err != nil {
+		_ = tx.Rollback()
 		return fmt.Errorf("failed to set key: %w", err)
 	}
 
 	// Record the pending op
 	if err := recordPendingOp(tx, "set", key, value); err != nil {
+		_ = tx.Rollback()
 		return err
 	}
 
@@ -241,16 +242,17 @@ func sqliteDeleteWithPendingOp(db *sql.DB, key []byte) error {
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
-	defer func() { _ = tx.Rollback() }()
 
 	// Delete the key
 	_, err = tx.Exec("DELETE FROM kv WHERE key = ?", key)
 	if err != nil {
+		_ = tx.Rollback()
 		return fmt.Errorf("failed to delete key: %w", err)
 	}
 
 	// Record the pending op
 	if err := recordPendingOp(tx, "delete", key, nil); err != nil {
+		_ = tx.Rollback()
 		return err
 	}
 

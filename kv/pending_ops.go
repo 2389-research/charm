@@ -20,7 +20,13 @@ type PendingOp struct {
 
 // recordPendingOp logs a write operation to the pending_ops table.
 // This is called within the same transaction as the actual write.
+// opType must be "set" or "delete".
 func recordPendingOp(tx *sql.Tx, opType string, key, value []byte) error {
+	// Validate opType before SQL to provide clear error messages
+	if opType != "set" && opType != "delete" {
+		return fmt.Errorf("invalid pending op type: %q (must be 'set' or 'delete')", opType)
+	}
+
 	_, err := tx.Exec(`
 		INSERT INTO pending_ops (op_type, key, value, created_at)
 		VALUES (?, ?, ?, ?)

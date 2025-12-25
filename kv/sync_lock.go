@@ -15,14 +15,20 @@ import (
 const (
 	// syncLockTimeout is how long a sync lock is held before expiring.
 	// This prevents deadlocks if a process crashes while holding the lock.
-	syncLockTimeout = 60 * time.Second
+	// 30 seconds is enough for slow networks while not blocking too long on crash.
+	syncLockTimeout = 30 * time.Second
 )
 
 // ErrSyncLockHeld is returned when another process holds the sync lock.
 var ErrSyncLockHeld = errors.New("sync lock held by another process")
 
-// syncLockHolder generates a unique identifier for this process/instance.
-// Used to identify who holds the lock.
+// syncLockHolder generates a unique identifier for this lock acquisition.
+// Each call returns a new UUID to uniquely identify the lock holder.
+//
+// IMPORTANT: The caller must capture the returned holder ID and pass it to
+// releaseSyncLock. Do not call syncLockHolder() again to get the holder ID
+// for release - that will generate a new UUID and fail to release the lock.
+// The withSyncLock function handles this correctly.
 func syncLockHolder() string {
 	return uuid.New().String()
 }

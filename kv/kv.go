@@ -67,6 +67,16 @@ const (
 	backupWriteThreshold = 10
 )
 
+// Stale sync constants
+const (
+	// MetaLastSync is the key for storing the last successful sync timestamp.
+	MetaLastSync = "_meta:last_sync"
+
+	// DefaultStaleThreshold is how long before data is considered stale.
+	// Default is 1 hour. Set to 0 to disable auto-sync on stale reads.
+	DefaultStaleThreshold = 1 * time.Hour
+)
+
 // Option is a functional option for configuring KV store opening.
 type Option func(*Config)
 
@@ -338,7 +348,53 @@ func (kv *KV) syncWithContextLocked(ctx context.Context) error {
 	}
 
 	// Then sync from cloud
-	return kv.syncFromWithContext(ctx, kv.maxVersion())
+	if err := kv.syncFromWithContext(ctx, kv.maxVersion()); err != nil {
+		return err
+	}
+
+	// Record successful sync time
+	return kv.recordSyncTime()
+}
+
+// recordSyncTime stores the current time as the last sync timestamp.
+func (kv *KV) recordSyncTime() error {
+	return sqliteSetMeta(kv.db, "last_sync", time.Now().UTC().Unix())
+}
+
+// LastSyncTime returns when the database was last successfully synced.
+// Returns zero time if never synced or if db is nil.
+func (kv *KV) LastSyncTime() time.Time {
+	if kv.db == nil {
+		return time.Time{}
+	}
+	unixTime, err := sqliteGetMeta(kv.db, "last_sync")
+	if err != nil || unixTime == 0 {
+		return time.Time{} // Never synced
+	}
+	return time.Unix(unixTime, 0).UTC()
+}
+
+// IsStale returns true if the last sync was longer ago than the given threshold.
+// Returns true if never synced. Returns false if threshold is 0 (disabled).
+func (kv *KV) IsStale(threshold time.Duration) bool {
+	if threshold == 0 {
+		return false // Stale check disabled
+	}
+	lastSync := kv.LastSyncTime()
+	if lastSync.IsZero() {
+		return true // Never synced - consider stale
+	}
+	return time.Since(lastSync) > threshold
+}
+
+// SyncIfStale syncs with the server if the last sync was longer ago than threshold.
+// Returns nil if no sync was needed or if sync succeeded.
+// This is useful for ensuring fresh data on read operations.
+func (kv *KV) SyncIfStale(threshold time.Duration) error {
+	if !kv.IsStale(threshold) {
+		return nil
+	}
+	return kv.Sync()
 }
 
 // syncAfterWrite tracks writes and triggers backup when threshold is reached.
